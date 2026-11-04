@@ -26,7 +26,7 @@
 #endif
 
 #define MAX_MACRO_INPUT_LIMIT 30
-#define MAX_MACRO_LIMIT 12
+#define MAX_CUSTOM_MACROS 12
 #define INPUT_HOLD_US 16666
 
 // Input Macro Module Name
