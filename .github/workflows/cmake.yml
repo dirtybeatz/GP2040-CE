@@ -81,23 +81,42 @@ jobs:
           submodules: recursive
 
       - name: Patch Proto & Web UI for 12 Macros
-        shell: bash
+        shell: python3 {0}
         run: |
-          # 1. Protobuf Enums um Macro 7-12 erweitern (IDs 143-148)
-          if ! grep -q "BUTTON_PRESS_MACRO_7" proto/enums.proto; then
-            sed -i '/SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;/a \    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;' proto/enums.proto
-          fi
+          import glob
 
-          # 2. React Macro-Limit von 6 auf 12 setzen
-          sed -i 's/const MACRO_LIMIT = 6;/const MACRO_LIMIT = 12;/g' www/src/Pages/InputMacroAddonPage.tsx
+          # 1. proto/enums.proto
+          with open("proto/enums.proto", "r", encoding="utf-8") as f:
+              c = f.read()
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              target = "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;"
+              addition = target + "\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;"
+              c = c.replace(target, addition)
+              with open("proto/enums.proto", "w", encoding="utf-8") as f:
+                  f.write(c)
 
-          # 3. Englische & GpioAction Locales erweitern
-          find www/src/Locales -type f \( -name "PinMapping.jsx" -o -name "GpioAction.jsx" \) | while read -r file; do
-            if ! grep -q "BUTTON_PRESS_MACRO_7" "$file"; then
-              sed -i "/BUTTON_PRESS_MACRO_6: 'Macro 6',/a \\\t\tBUTTON_PRESS_MACRO_7: 'Macro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Macro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Macro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Macro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Macro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Macro 12'," "$file"
-              sed -i "/BUTTON_PRESS_MACRO_6: 'Makro 6',/a \\\t\tBUTTON_PRESS_MACRO_7: 'Makro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Makro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Makro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Makro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Makro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Makro 12'," "$file"
-            fi
-          done
+          # 2. www/src/Pages/InputMacroAddonPage.tsx
+          with open("www/src/Pages/InputMacroAddonPage.tsx", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("const MACRO_LIMIT = 6;", "const MACRO_LIMIT = 12;")
+          with open("www/src/Pages/InputMacroAddonPage.tsx", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 3. Locales (PinMapping.jsx & GpioAction.jsx)
+          for path in glob.glob("www/src/Locales/**/*.jsx", recursive=True):
+              with open(path, "r", encoding="utf-8") as f:
+                  loc = f.read()
+              if "BUTTON_PRESS_MACRO_6" in loc and "BUTTON_PRESS_MACRO_7" not in loc:
+                  loc = loc.replace(
+                      "BUTTON_PRESS_MACRO_6: 'Macro 6',",
+                      "BUTTON_PRESS_MACRO_6: 'Macro 6',\n\t\tBUTTON_PRESS_MACRO_7: 'Macro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Macro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Macro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Macro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Macro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Macro 12',"
+                  )
+                  loc = loc.replace(
+                      "BUTTON_PRESS_MACRO_6: 'Makro 6',",
+                      "BUTTON_PRESS_MACRO_6: 'Makro 6',\n\t\tBUTTON_PRESS_MACRO_7: 'Makro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Makro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Makro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Makro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Makro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Makro 12',"
+                  )
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(loc)
 
       - name: Use Node.js
         uses: actions/setup-node@v6.1.0
@@ -156,30 +175,50 @@ jobs:
           submodules: recursive
 
       - name: Patch C++ Firmware & Protobuf for 12 Macros
-        shell: bash
+        shell: python3 {0}
         run: |
           # 1. headers/addons/input_macro.h
-          sed -i 's/#define MAX_MACRO_LIMIT 6/#define MAX_MACRO_LIMIT 12/g' headers/addons/input_macro.h
-          sed -i 's/Mask_t macroPinMasks\[6\];/Mask_t macroPinMasks[MAX_MACRO_LIMIT];/g' headers/addons/input_macro.h
+          with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("#define MAX_MACRO_LIMIT 6", "#define MAX_MACRO_LIMIT 12")
+          c = c.replace("Mask_t macroPinMasks[6];", "Mask_t macroPinMasks[MAX_MACRO_LIMIT];")
+          with open("headers/addons/input_macro.h", "w", encoding="utf-8") as f:
+              f.write(c)
 
           # 2. proto/config.proto
-          sed -i 's/repeated Macro macroList = 3 \[(nanopb).max_count = 6\];/repeated Macro macroList = 3 [(nanopb).max_count = 12];/g' proto/config.proto
+          with open("proto/config.proto", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 12];")
+          with open("proto/config.proto", "w", encoding="utf-8") as f:
+              f.write(c)
 
           # 3. proto/enums.proto
-          if ! grep -q "BUTTON_PRESS_MACRO_7" proto/enums.proto; then
-            sed -i '/SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;/a \    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;' proto/enums.proto
-          fi
-
-          # 4. src/addons/input_macro.cpp (available, setup, reinit)
-          if ! grep -q "BUTTON_PRESS_MACRO_7" src/addons/input_macro.cpp; then
-            sed -i '/case GpioAction::BUTTON_PRESS_MACRO_6:/, /return true;/ s/case GpioAction::BUTTON_PRESS_MACRO_6:/case GpioAction::BUTTON_PRESS_MACRO_6:\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n            case GpioAction::BUTTON_PRESS_MACRO_9:\n            case GpioAction::BUTTON_PRESS_MACRO_10:\n            case GpioAction::BUTTON_PRESS_MACRO_11:\n            case GpioAction::BUTTON_PRESS_MACRO_12:/' src/addons/input_macro.cpp
-            sed -i '/macroPinMasks\[5\] = Mask_t{1} << pin;\n                break;/a \            case GpioAction::BUTTON_PRESS_MACRO_7:\n                macroPinMasks[6] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                macroPinMasks[7] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_9:\n                macroPinMasks[8] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_10:\n                macroPinMasks[9] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_11:\n                macroPinMasks[10] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_12:\n                macroPinMasks[11] = Mask_t{1} << pin;\n                break;' src/addons/input_macro.cpp
-            # Fallback falls mehrzeiliges sed nicht greift:
-            python3 -c '
-          with open("src/addons/input_macro.cpp", "r") as f:
+          with open("proto/enums.proto", "r", encoding="utf-8") as f:
               c = f.read()
-          target = "            case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;"
-          replacement = target + """
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              target = "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;"
+              addition = target + "\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;"
+              c = c.replace(target, addition)
+              with open("proto/enums.proto", "w", encoding="utf-8") as f:
+                  f.write(c)
+
+          # 4. src/addons/input_macro.cpp
+          with open("src/addons/input_macro.cpp", "r", encoding="utf-8") as f:
+              c = f.read()
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              avail_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:\n                return true;"
+              avail_new = """            case GpioAction::BUTTON_PRESS_MACRO_6:
+            case GpioAction::BUTTON_PRESS_MACRO_7:
+            case GpioAction::BUTTON_PRESS_MACRO_8:
+            case GpioAction::BUTTON_PRESS_MACRO_9:
+            case GpioAction::BUTTON_PRESS_MACRO_10:
+            case GpioAction::BUTTON_PRESS_MACRO_11:
+            case GpioAction::BUTTON_PRESS_MACRO_12:
+                return true;"""
+              c = c.replace(avail_old, avail_new)
+
+              setup_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;"
+              setup_new = setup_old + """
             case GpioAction::BUTTON_PRESS_MACRO_7:
                 macroPinMasks[6] = Mask_t{1} << pin;
                 break;
@@ -198,34 +237,50 @@ jobs:
             case GpioAction::BUTTON_PRESS_MACRO_12:
                 macroPinMasks[11] = Mask_t{1} << pin;
                 break;"""
-          if "macroPinMasks[6]" not in c:
-              c = c.replace(target, replacement)
-              with open("src/addons/input_macro.cpp", "w") as f:
+              c = c.replace(setup_old, setup_new)
+              with open("src/addons/input_macro.cpp", "w", encoding="utf-8") as f:
                   f.write(c)
-          '
-          fi
 
-          # 5. src/config_utils.cpp (actionList Array von 6 auf 12 erweitern)
-          python3 -c '
-          with open("src/config_utils.cpp", "r") as f:
+          # 5. src/config_utils.cpp
+          with open("src/config_utils.cpp", "r", encoding="utf-8") as f:
               c = f.read()
-          old = """const static GpioAction actionList[6] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
+          old_list = """const static GpioAction actionList[6] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
                                                     GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
                                                     GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6 };"""
-          new = """const static GpioAction actionList[MAX_MACRO_LIMIT] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
+          new_list = """const static GpioAction actionList[MAX_MACRO_LIMIT] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
                                                     GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
                                                     GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6,
                                                     GpioAction::BUTTON_PRESS_MACRO_7, GpioAction::BUTTON_PRESS_MACRO_8,
                                                     GpioAction::BUTTON_PRESS_MACRO_9, GpioAction::BUTTON_PRESS_MACRO_10,
                                                     GpioAction::BUTTON_PRESS_MACRO_11, GpioAction::BUTTON_PRESS_MACRO_12 };"""
-          c = c.replace(old, new)
-          with open("src/config_utils.cpp", "w") as f:
+          c = c.replace(old_list, new_list)
+          with open("src/config_utils.cpp", "w", encoding="utf-8") as f:
               f.write(c)
-          '
 
-          # 6. Display-Screens (PinViewerScreen.h & ButtonLayoutScreen.cpp)
-          sed -i '/{GpioAction::BUTTON_PRESS_MACRO_6, "M6"},/a \            {GpioAction::BUTTON_PRESS_MACRO_7, "M7"},\n            {GpioAction::BUTTON_PRESS_MACRO_8, "M8"},\n            {GpioAction::BUTTON_PRESS_MACRO_9, "M9"},\n            {GpioAction::BUTTON_PRESS_MACRO_10, "M10"},\n            {GpioAction::BUTTON_PRESS_MACRO_11, "M11"},\n            {GpioAction::BUTTON_PRESS_MACRO_12, "M12"},' headers/display/ui/screens/PinViewerScreen.h
-          sed -i '/case GpioAction::BUTTON_PRESS_MACRO_6:/a \            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n            case GpioAction::BUTTON_PRESS_MACRO_9:\n            case GpioAction::BUTTON_PRESS_MACRO_10:\n            case GpioAction::BUTTON_PRESS_MACRO_11:\n            case GpioAction::BUTTON_PRESS_MACRO_12:' src/display/ui/screens/ButtonLayoutScreen.cpp
+          # 6. headers/display/ui/screens/PinViewerScreen.h
+          with open("headers/display/ui/screens/PinViewerScreen.h", "r", encoding="utf-8") as f:
+              c = f.read()
+          pv_old = '{GpioAction::BUTTON_PRESS_MACRO_6, "M6"},'
+          pv_new = pv_old + '\n            {GpioAction::BUTTON_PRESS_MACRO_7, "M7"},\n            {GpioAction::BUTTON_PRESS_MACRO_8, "M8"},\n            {GpioAction::BUTTON_PRESS_MACRO_9, "M9"},\n            {GpioAction::BUTTON_PRESS_MACRO_10, "M10"},\n            {GpioAction::BUTTON_PRESS_MACRO_11, "M11"},\n            {GpioAction::BUTTON_PRESS_MACRO_12, "M12"},'
+          c = c.replace(pv_old, pv_new)
+          with open("headers/display/ui/screens/PinViewerScreen.h", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 7. src/display/ui/screens/ButtonLayoutScreen.cpp
+          with open("src/display/ui/screens/ButtonLayoutScreen.cpp", "r", encoding="utf-8") as f:
+              c = f.read()
+          bl_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:"
+          bl_new = bl_old + "\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n            case GpioAction::BUTTON_PRESS_MACRO_9:\n            case GpioAction::BUTTON_PRESS_MACRO_10:\n            case GpioAction::BUTTON_PRESS_MACRO_11:\n            case GpioAction::BUTTON_PRESS_MACRO_12:"
+          c = c.replace(bl_old, bl_new)
+          with open("src/display/ui/screens/ButtonLayoutScreen.cpp", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 8. src/webconfig.cpp (Payload-Limit für 12 Makros verdoppeln)
+          with open("src/webconfig.cpp", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("#define LWIP_HTTPD_POST_MAX_PAYLOAD_LEN (1024 * 16)", "#define LWIP_HTTPD_POST_MAX_PAYLOAD_LEN (1024 * 32)")
+          with open("src/webconfig.cpp", "w", encoding="utf-8") as f:
+              f.write(c)
 
       - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
