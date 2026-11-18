@@ -125,29 +125,29 @@ jobs:
           cache-dependency-path: www/package-lock.json
 
       - name: Clean install
-        working-directory: \${{github.workspace}}/www
+        working-directory: ${{github.workspace}}/www
         run: npm ci
 
       - name: Build WWW
-        working-directory: \${{github.workspace}}/www
+        working-directory: ${{github.workspace}}/www
         run: CI=false npm run build --if-present
 
       - name: Upload www Artifact
         uses: actions/upload-artifact@v6.0.0
         with:
           name: fsData
-          path: \${{github.workspace}}/lib/httpd/fsdata.c
+          path: ${{github.workspace}}/lib/httpd/fsdata.c
           if-no-files-found: error
 
   build-config-list:
     runs-on: ubuntu-latest
     outputs:
-      matrix: \${{ steps.set-matrix.outputs.matrix }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6.0.1
       - id: set-matrix
         run: |
-          CONFIG_DIRS=\$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
+          CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix=$CONFIG_DIRS" >> $GITHUB_OUTPUT
 
   build:
@@ -155,7 +155,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        GP2040_BOARDCONFIG: \${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON(needs.build-config-list.outputs.matrix) }}
+        GP2040_BOARDCONFIG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON(needs.build-config-list.outputs.matrix) }}
     steps:
       - name: Setup cmake
         uses: jwlawson/actions-setup-cmake@v2
@@ -245,14 +245,14 @@ jobs:
           path: pico-sdk
 
       - name: Checkout pico-sdk submodules
-        working-directory: \${{github.workspace}}/pico-sdk
+        working-directory: ${{github.workspace}}/pico-sdk
         run: git submodule update --init
 
       - name: Download Web Build Artifact
         uses: actions/download-artifact@v7.0.0
         with:
           name: fsData
-          path: \${{github.workspace}}/lib/httpd/
+          path: ${{github.workspace}}/lib/httpd/
 
       - name: Get core count
         id: core_count
@@ -264,4 +264,11 @@ jobs:
 
       - name: Pico Build
         shell: bash
-        run: GP204
+        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel ${{steps.core_count.outputs.output}}
+
+      - name: Upload Pico Artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
+          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
+          if-no-files-found: error
