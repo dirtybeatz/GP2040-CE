@@ -1,0 +1,263 @@
+name: CMake (8 Macro Slots Clean Build)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      board_config:
+        description: "Board configuration to build (Default: Haute42COSMOX)"
+        required: false
+        default: "Haute42COSMOX"
+        type: choice
+        options:
+          - Haute42COSMOX
+          - ""
+          - ARCController
+          - ASiLVLABC
+          - ASiLVLWASD
+          - Blank
+          - Pico
+          - PicoW
+          - Pico2
+          - BentoBox
+          - FlatboxRev4
+          - FlatboxRev5
+          - FlatboxRev5RGB
+          - FlatboxRev5USBPassthrough
+          - FlatboxRev5Southpaw
+          - FlatboxRev8
+          - Granola
+          - GranolaBeacon
+          - AdafruitKB2040
+          - KeyboardConverter
+          - Haute42COSMOXCAS
+          - Haute42COSMOXCAT
+          - Haute42COSMOXMLite
+          - Haute42COSMOXMUltra
+          - Haute42COSMOXXAnalog
+          - Liatris
+          - MavercadeRev1
+          - MavercadeRev2
+          - MavercadeRev3
+          - MiSTercadeV2
+          - OpenCore0
+          - OpenCore0MIXUP
+          - OpenCore0WASD
+          - OSUMGP-RP2040
+          - PicoFightingBoard
+          - PimoroniPicoPlus2
+          - PXPGamepad
+          - ReflexCtrlGenesis6
+          - ReflexCtrlNES
+          - ReflexCtrlSaturn
+          - ReflexCtrlSNES
+          - ReflexCtrlVB
+          - ReflexEncodeV1.2
+          - ReflexEncodeV2.0
+          - RP2040AdvancedBreakoutBoard
+          - RP2040AdvancedBreakoutBoardUSBPassthrough
+          - RP2040MiniBreakoutBoard
+          - RP2040MiniBreakoutBoardUSBPassthrough
+          - SeeedXIAORP2040
+          - SparkFunProMicro
+          - SparkFunProMicroRP2350
+          - WaveshareZero
+          - WaveshareRP2350BPlusW
+          - SGFDevices
+          - ZeroRhythm
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # SCHRITT 1: Web-Configurator auf 8 Slots patchen und neu bauen
+  build-web:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Patch Web-UI & Enums (6 -> 8 Slots)
+        run: |
+          python3 - << 'EOF'
+          # 1. proto/enums.proto: BUTTON_PRESS_MACRO_7 (143) und 8 (144) anfügen
+          with open("proto/enums.proto", "r", encoding="utf-8") as f:
+              c = f.read()
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              c = c.replace(
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
+              )
+              with open("proto/enums.proto", "w", encoding="utf-8") as f:
+                  f.write(c)
+
+          # 2. www/src/Pages/InputMacroAddonPage.tsx: MACRO_LIMIT auf 8, MACRO_INPUTS_MAX auf 22
+          with open("www/src/Pages/InputMacroAddonPage.tsx", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("const MACRO_INPUTS_MAX = 30;", "const MACRO_INPUTS_MAX = 22;")
+          c = c.replace("const MACRO_LIMIT = 6;", "const MACRO_LIMIT = 8;")
+          with open("www/src/Pages/InputMacroAddonPage.tsx", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 3. Sprachdateien für Pin-Mapping (EN & DE) ergänzen
+          locales = [
+              ("www/src/Locales/en/PinMapping.jsx", "Macro"),
+              ("www/src/Locales/en/Proto/GpioAction.jsx", "Macro"),
+              ("www/src/Locales/de-DE/PinMapping.jsx", "Makro"),
+          ]
+          for path, word in locales:
+              with open(path, "r", encoding="utf-8") as f:
+                  c = f.read()
+              if "BUTTON_PRESS_MACRO_7" not in c:
+                  target = f"BUTTON_PRESS_MACRO_6: '{word} 6',"
+                  add = f"{target}\n\t\tBUTTON_PRESS_MACRO_7: '{word} 7',\n\t\tBUTTON_PRESS_MACRO_8: '{word} 8',"
+                  c = c.replace(target, add)
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(c)
+          EOF
+
+      - name: Use Node.js
+        uses: actions/setup-node@v6.1.0
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: www/package-lock.json
+
+      - name: Clean install
+        working-directory: ${{github.workspace}}/www
+        run: npm ci
+
+      - name: Build WWW (generates lib/httpd/fsdata.c)
+        working-directory: ${{github.workspace}}/www
+        run: CI=false npm run build --if-present
+
+      - name: Upload www Artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: fsData
+          path: ${{github.workspace}}/lib/httpd/fsdata.c
+          if-no-files-found: error
+
+  # SCHRITT 2: C++ Firmware synchron auf 8 Slots patchen und UF2 bauen
+  build:
+    needs: [build-web]
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        GP2040_BOARDCONFIG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON('["Haute42COSMOX"]') }}
+    steps:
+      - name: Setup cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.x"
+
+      - name: Checkout GP2040-CE
+        uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Patch C++ Firmware & Protobuf (6 -> 8 Slots)
+        run: |
+          python3 - << 'EOF'
+          # 1. headers/addons/input_macro.h
+          with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("#define MAX_MACRO_INPUT_LIMIT 30", "#define MAX_MACRO_INPUT_LIMIT 22")
+          c = c.replace("#define MAX_MACRO_LIMIT 6", "#define MAX_MACRO_LIMIT 8")
+          c = c.replace("Mask_t macroPinMasks[6];", "Mask_t macroPinMasks[MAX_MACRO_LIMIT];")
+          with open("headers/addons/input_macro.h", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 2. proto/config.proto (8 Makros à 22 Inputs -> passt exakt in originale 32KB EEPROM!)
+          with open("proto/config.proto", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("repeated MacroInput macroInputs = 3 [(nanopb).max_count = 30];", "repeated MacroInput macroInputs = 3 [(nanopb).max_count = 22];")
+          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
+          with open("proto/config.proto", "w", encoding="utf-8") as f:
+              f.write(c)
+
+          # 3. proto/enums.proto
+          with open("proto/enums.proto", "r", encoding="utf-8") as f:
+              c = f.read()
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              c = c.replace(
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
+              )
+              with open("proto/enums.proto", "w", encoding="utf-8") as f:
+                  f.write(c)
+
+          # 4. src/addons/input_macro.cpp
+          with open("src/addons/input_macro.cpp", "r", encoding="utf-8") as f:
+              c = f.read()
+          if "BUTTON_PRESS_MACRO_7" not in c:
+              c = c.replace(
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                return true;",
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                return true;"
+              )
+              c = c.replace(
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;",
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n                macroPinMasks[6] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                macroPinMasks[7] = Mask_t{1} << pin;\n                break;"
+              )
+              with open("src/addons/input_macro.cpp", "w", encoding="utf-8") as f:
+                  f.write(c)
+
+          # 5. src/config_utils.cpp
+          with open("src/config_utils.cpp", "r", encoding="utf-8") as f:
+              c = f.read()
+          old_list = """const static GpioAction actionList[6] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
+                                                    GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
+                                                    GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6 };"""
+          new_list = """const static GpioAction actionList[MAX_MACRO_LIMIT] = {
+            GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
+            GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
+            GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6,
+            GpioAction::BUTTON_PRESS_MACRO_7, GpioAction::BUTTON_PRESS_MACRO_8 };"""
+          c = c.replace(old_list, new_list)
+          with open("src/config_utils.cpp", "w", encoding="utf-8") as f:
+              f.write(c)
+          EOF
+
+      - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with: 
+          release: '15.3.Rel1'
+
+      - name: Checkout pico-sdk/2.3.1
+        uses: actions/checkout@v6.0.1
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.1
+          path: pico-sdk
+
+      - name: Checkout pico-sdk submodules
+        working-directory: ${{github.workspace}}/pico-sdk
+        run: git submodule update --init
+
+      - name: Download a Build Artifact
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: fsData
+          path: ${{github.workspace}}/lib/httpd/
+
+      - name: Get core count
+        id: core_count
+        run: echo "output=$(nproc)" >> $GITHUB_OUTPUT
+
+      - name: Pico Build Configure CMake
+        shell: bash
+        run: PICO_SDK_PATH=${{github.workspace}}/pico-sdk GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} SKIP_WEBBUILD=TRUE cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+      - name: Pico Build
+        shell: bash
+        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel ${{steps.core_count.outputs.output}}
+
+      - name: Upload Pico Artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
+          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
+          if-no-files-found: error
