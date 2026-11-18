@@ -174,9 +174,17 @@ jobs:
           fetch-tags: true
           submodules: recursive
 
-      - name: Patch C++ Firmware & Protobuf for 12 Macros
+      - name: Patch C++ Firmware, FlashPROM & Protobuf for 12 Macros
         shell: python3 {0}
         run: |
+          # 0. lib/FlashPROM/src/FlashPROM.h (Erhöhe EEPROM-Bereich von 32KB auf 64KB für Config_size 36338)
+          with open("lib/FlashPROM/src/FlashPROM.h", "r", encoding="utf-8") as f:
+              c = f.read()
+          c = c.replace("#define EEPROM_SIZE_BYTES    0x8000", "#define EEPROM_SIZE_BYTES    0x10000")
+          c = c.replace("#define EEPROM_ADDRESS_START _u(0x101F8000)", "#define EEPROM_ADDRESS_START _u(0x101F0000)")
+          with open("lib/FlashPROM/src/FlashPROM.h", "w", encoding="utf-8") as f:
+              f.write(c)
+
           # 1. headers/addons/input_macro.h
           with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
               c = f.read()
