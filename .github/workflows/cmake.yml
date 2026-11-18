@@ -1,10 +1,12 @@
-name: CMake (8 Macros Safe RAM & EEPROM)
+name: CMake
 
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  #  pull_request_target:
+  #    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       board_config:
@@ -72,73 +74,8 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build-web:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6.0.1
-
-      - name: Patch Web & Proto for 8 Macro Slots
-        run: |
-          python3 - << 'EOF'
-          # 1. proto/enums.proto (IDs 143 & 144 nach SUSTAIN_SOCD_MODE_ADVANCED_4 = 142)
-          with open("proto/enums.proto", "r", encoding="utf-8") as f:
-              c = f.read()
-          if "BUTTON_PRESS_MACRO_7" not in c:
-              c = c.replace(
-                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
-                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
-              )
-              with open("proto/enums.proto", "w", encoding="utf-8") as f:
-                  f.write(c)
-
-          # 2. www/src/Pages/InputMacroAddonPage.tsx
-          with open("www/src/Pages/InputMacroAddonPage.tsx", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("const MACRO_LIMIT = 6;", "const MACRO_LIMIT = 8;")
-          c = c.replace("const MACRO_LIMIT = 10;", "const MACRO_LIMIT = 8;")
-          c = c.replace("const MACRO_LIMIT = 12;", "const MACRO_LIMIT = 8;")
-          with open("www/src/Pages/InputMacroAddonPage.tsx", "w", encoding="utf-8") as f:
-              f.write(c)
-
-          # 3. Locales (EN & DE)
-          locales = [
-              ("www/src/Locales/en/PinMapping.jsx", "Macro"),
-              ("www/src/Locales/en/Proto/GpioAction.jsx", "Macro"),
-              ("www/src/Locales/de-DE/PinMapping.jsx", "Makro"),
-          ]
-          for path, word in locales:
-              with open(path, "r", encoding="utf-8") as f:
-                  c = f.read()
-              if "BUTTON_PRESS_MACRO_7" not in c:
-                  target = f"BUTTON_PRESS_MACRO_6: '{word} 6',"
-                  add = f"{target}\n\t\tBUTTON_PRESS_MACRO_7: '{word} 7',\n\t\tBUTTON_PRESS_MACRO_8: '{word} 8',"
-                  c = c.replace(target, add)
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(c)
-          EOF
-
-      - name: Use Node.js
-        uses: actions/setup-node@v6.1.0
-        with:
-          node-version: '20.x'
-          cache: 'npm'
-          cache-dependency-path: www/package-lock.json
-
-      - name: Clean install
-        working-directory: ${{github.workspace}}/www
-        run: npm ci
-
-      - name: Build WWW
-        working-directory: ${{github.workspace}}/www
-        run: CI=false npm run build --if-present
-
-      - name: Upload www Artifact
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: fsData
-          path: ${{github.workspace}}/lib/httpd/fsdata.c
-          if-no-files-found: error
-
+  call-node-workflow:
+    uses: ./.github/workflows/node.js.yml
   build-config-list:
     runs-on: ubuntu-latest
     outputs:
@@ -149,9 +86,11 @@ jobs:
         run: |
           CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix=$CONFIG_DIRS" >> $GITHUB_OUTPUT
-
   build:
-    needs: [build-web, build-config-list]
+    needs: [call-node-workflow, build-config-list]
+    # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
+    # You can convert this to a matrix build if you need cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -161,79 +100,15 @@ jobs:
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: "3.31.x"
+      - name: Verify cmake
+        run: cmake --version
 
+      #Global Setup
       - name: Checkout GP2040-CE
         uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Patch Firmware for 8 Macro Slots (Safe 32KB EEPROM)
-        run: |
-          python3 - << 'EOF'
-          # 1. headers/addons/input_macro.h
-          with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("#define MAX_MACRO_LIMIT 6", "#define MAX_MACRO_LIMIT 8")
-          c = c.replace("#define MAX_MACRO_LIMIT 10", "#define MAX_MACRO_LIMIT 8")
-          c = c.replace("#define MAX_MACRO_LIMIT 12", "#define MAX_MACRO_LIMIT 8")
-          c = c.replace("Mask_t macroPinMasks[6];", "Mask_t macroPinMasks[MAX_MACRO_LIMIT];")
-          with open("headers/addons/input_macro.h", "w", encoding="utf-8") as f:
-              f.write(c)
-
-          # 2. proto/config.proto (8 Makros + Platz im 32KB-Limit schaffen ohne FlashPROM.h anzufassen!)
-          with open("proto/config.proto", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
-          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 10];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
-          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 12];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
-          # Platz im Protobuf sparen, damit Config_size locker unter 32768 Bytes (0x8000) bleibt:
-          c = c.replace("optional string macroLabel = 2 [(nanopb).max_length = 64];", "optional string macroLabel = 2 [(nanopb).max_length = 32];")
-          c = c.replace("repeated LightCluster lightClusterData = 40 [(nanopb).max_count = 100];", "repeated LightCluster lightClusterData = 40 [(nanopb).max_count = 60];")
-          with open("proto/config.proto", "w", encoding="utf-8") as f:
-              f.write(c)
-
-          # 3. proto/enums.proto
-          with open("proto/enums.proto", "r", encoding="utf-8") as f:
-              c = f.read()
-          if "BUTTON_PRESS_MACRO_7" not in c:
-              c = c.replace(
-                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
-                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
-              )
-              with open("proto/enums.proto", "w", encoding="utf-8") as f:
-                  f.write(c)
-
-          # 4. src/addons/input_macro.cpp
-          with open("src/addons/input_macro.cpp", "r", encoding="utf-8") as f:
-              c = f.read()
-          if "BUTTON_PRESS_MACRO_7" not in c:
-              c = c.replace(
-                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                return true;",
-                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                return true;"
-              )
-              c = c.replace(
-                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;",
-                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n                macroPinMasks[6] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                macroPinMasks[7] = Mask_t{1} << pin;\n                break;"
-              )
-              with open("src/addons/input_macro.cpp", "w", encoding="utf-8") as f:
-                  f.write(c)
-
-          # 5. src/config_utils.cpp
-          with open("src/config_utils.cpp", "r", encoding="utf-8") as f:
-              c = f.read()
-          old_list = """const static GpioAction actionList[6] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
-                                                    GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
-                                                    GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6 };"""
-          new_list = """const static GpioAction actionList[MAX_MACRO_LIMIT] = {
-            GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
-            GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
-            GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6,
-            GpioAction::BUTTON_PRESS_MACRO_7, GpioAction::BUTTON_PRESS_MACRO_8 };"""
-          c = c.replace(old_list, new_list)
-          with open("src/config_utils.cpp", "w", encoding="utf-8") as f:
-              f.write(c)
-          EOF
 
       - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
@@ -251,7 +126,7 @@ jobs:
         working-directory: ${{github.workspace}}/pico-sdk
         run: git submodule update --init
 
-      - name: Download Web Build Artifact
+      - name: Download a Build Artifact
         uses: actions/download-artifact@v7.0.0
         with:
           name: fsData
@@ -259,7 +134,8 @@ jobs:
 
       - name: Get core count
         id: core_count
-        run: echo "output=$(nproc)" >> $GITHUB_OUTPUT
+        run: cat /proc/cpuinfo  | grep processor | wc -l
+        #End Global Setup
 
       - name: Pico Build Configure CMake
         shell: bash
@@ -274,4 +150,12 @@ jobs:
         with:
           name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
           path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
+          if-no-files-found: error
+
+      - name: Upload .elf Artifact
+        if: ${{ matrix.GP2040_BOARDCONFIG == 'Pico'}}
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: elf
+          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
           if-no-files-found: error
