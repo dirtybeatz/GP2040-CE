@@ -1,4 +1,4 @@
-name: CMake (12 Macro Slots)
+name: CMake (8 Macros All-in-One)
 
 on:
   push:
@@ -75,48 +75,47 @@ jobs:
   build-web:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout GP2040-CE
-        uses: actions/checkout@v6.0.1
-        with:
-          submodules: recursive
+      - uses: actions/checkout@v6.0.1
 
-      - name: Patch Proto & Web UI for 12 Macros
-        shell: python3 {0}
+      - name: Patch Web & Proto for 8 Macro Slots
         run: |
-          import glob
-
-          # 1. proto/enums.proto
+          python3 - << 'EOF'
+          # 1. proto/enums.proto (IDs 143 & 144 nach SUSTAIN_SOCD_MODE_ADVANCED_4 = 142)
           with open("proto/enums.proto", "r", encoding="utf-8") as f:
               c = f.read()
           if "BUTTON_PRESS_MACRO_7" not in c:
-              target = "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;"
-              addition = target + "\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;"
-              c = c.replace(target, addition)
+              c = c.replace(
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
+              )
               with open("proto/enums.proto", "w", encoding="utf-8") as f:
                   f.write(c)
 
           # 2. www/src/Pages/InputMacroAddonPage.tsx
           with open("www/src/Pages/InputMacroAddonPage.tsx", "r", encoding="utf-8") as f:
               c = f.read()
-          c = c.replace("const MACRO_LIMIT = 6;", "const MACRO_LIMIT = 12;")
+          c = c.replace("const MACRO_LIMIT = 6;", "const MACRO_LIMIT = 8;")
+          c = c.replace("const MACRO_LIMIT = 10;", "const MACRO_LIMIT = 8;")
+          c = c.replace("const MACRO_LIMIT = 12;", "const MACRO_LIMIT = 8;")
           with open("www/src/Pages/InputMacroAddonPage.tsx", "w", encoding="utf-8") as f:
               f.write(c)
 
-          # 3. Locales (PinMapping.jsx & GpioAction.jsx)
-          for path in glob.glob("www/src/Locales/**/*.jsx", recursive=True):
+          # 3. Locales (EN & DE)
+          locales = [
+              ("www/src/Locales/en/PinMapping.jsx", "Macro"),
+              ("www/src/Locales/en/Proto/GpioAction.jsx", "Macro"),
+              ("www/src/Locales/de-DE/PinMapping.jsx", "Makro"),
+          ]
+          for path, word in locales:
               with open(path, "r", encoding="utf-8") as f:
-                  loc = f.read()
-              if "BUTTON_PRESS_MACRO_6" in loc and "BUTTON_PRESS_MACRO_7" not in loc:
-                  loc = loc.replace(
-                      "BUTTON_PRESS_MACRO_6: 'Macro 6',",
-                      "BUTTON_PRESS_MACRO_6: 'Macro 6',\n\t\tBUTTON_PRESS_MACRO_7: 'Macro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Macro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Macro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Macro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Macro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Macro 12',"
-                  )
-                  loc = loc.replace(
-                      "BUTTON_PRESS_MACRO_6: 'Makro 6',",
-                      "BUTTON_PRESS_MACRO_6: 'Makro 6',\n\t\tBUTTON_PRESS_MACRO_7: 'Makro 7',\n\t\tBUTTON_PRESS_MACRO_8: 'Makro 8',\n\t\tBUTTON_PRESS_MACRO_9: 'Makro 9',\n\t\tBUTTON_PRESS_MACRO_10: 'Makro 10',\n\t\tBUTTON_PRESS_MACRO_11: 'Makro 11',\n\t\tBUTTON_PRESS_MACRO_12: 'Makro 12',"
-                  )
+                  c = f.read()
+              if "BUTTON_PRESS_MACRO_7" not in c:
+                  target = f"BUTTON_PRESS_MACRO_6: '{word} 6',"
+                  add = f"{target}\n\t\tBUTTON_PRESS_MACRO_7: '{word} 7',\n\t\tBUTTON_PRESS_MACRO_8: '{word} 8',"
+                  c = c.replace(target, add)
                   with open(path, "w", encoding="utf-8") as f:
-                      f.write(loc)
+                      f.write(c)
+          EOF
 
       - name: Use Node.js
         uses: actions/setup-node@v6.1.0
@@ -126,69 +125,58 @@ jobs:
           cache-dependency-path: www/package-lock.json
 
       - name: Clean install
-        working-directory: ${{github.workspace}}/www
+        working-directory: \${{github.workspace}}/www
         run: npm ci
 
-      - name: Build WWW & Generate fsdata.c
-        working-directory: ${{github.workspace}}/www
+      - name: Build WWW
+        working-directory: \${{github.workspace}}/www
         run: CI=false npm run build --if-present
 
       - name: Upload www Artifact
         uses: actions/upload-artifact@v6.0.0
         with:
           name: fsData
-          path: ${{github.workspace}}/lib/httpd/fsdata.c
+          path: \${{github.workspace}}/lib/httpd/fsdata.c
           if-no-files-found: error
 
   build-config-list:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      matrix: \${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6.0.1
       - id: set-matrix
         run: |
-          CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
+          CONFIG_DIRS=\$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
           echo "matrix=$CONFIG_DIRS" >> $GITHUB_OUTPUT
 
   build:
     needs: [build-web, build-config-list]
     runs-on: ubuntu-22.04
     strategy:
-      fail-fast: false
       matrix:
-        GP2040_BOARDCONFIG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON(needs.build-config-list.outputs.matrix) }}
+        GP2040_BOARDCONFIG: \${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON(needs.build-config-list.outputs.matrix) }}
     steps:
       - name: Setup cmake
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: "3.31.x"
 
-      - name: Verify cmake
-        run: cmake --version
-
       - name: Checkout GP2040-CE
         uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-          submodules: recursive
 
-      - name: Patch C++ Firmware, FlashPROM & Protobuf for 12 Macros
-        shell: python3 {0}
+      - name: Patch Firmware for 8 Macro Slots
         run: |
-          # 0. lib/FlashPROM/src/FlashPROM.h (Erhöhe EEPROM-Bereich von 32KB auf 64KB für Config_size 36338)
-          with open("lib/FlashPROM/src/FlashPROM.h", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("#define EEPROM_SIZE_BYTES    0x8000", "#define EEPROM_SIZE_BYTES    0x10000")
-          c = c.replace("#define EEPROM_ADDRESS_START _u(0x101F8000)", "#define EEPROM_ADDRESS_START _u(0x101F0000)")
-          with open("lib/FlashPROM/src/FlashPROM.h", "w", encoding="utf-8") as f:
-              f.write(c)
-
+          python3 - << 'EOF'
           # 1. headers/addons/input_macro.h
           with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
               c = f.read()
-          c = c.replace("#define MAX_MACRO_LIMIT 6", "#define MAX_MACRO_LIMIT 12")
+          c = c.replace("#define MAX_MACRO_LIMIT 6", "#define MAX_MACRO_LIMIT 8")
+          c = c.replace("#define MAX_MACRO_LIMIT 10", "#define MAX_MACRO_LIMIT 8")
+          c = c.replace("#define MAX_MACRO_LIMIT 12", "#define MAX_MACRO_LIMIT 8")
           c = c.replace("Mask_t macroPinMasks[6];", "Mask_t macroPinMasks[MAX_MACRO_LIMIT];")
           with open("headers/addons/input_macro.h", "w", encoding="utf-8") as f:
               f.write(c)
@@ -196,7 +184,9 @@ jobs:
           # 2. proto/config.proto
           with open("proto/config.proto", "r", encoding="utf-8") as f:
               c = f.read()
-          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 12];")
+          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
+          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 10];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
+          c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 12];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
           with open("proto/config.proto", "w", encoding="utf-8") as f:
               f.write(c)
 
@@ -204,9 +194,10 @@ jobs:
           with open("proto/enums.proto", "r", encoding="utf-8") as f:
               c = f.read()
           if "BUTTON_PRESS_MACRO_7" not in c:
-              target = "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;"
-              addition = target + "\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;\n    BUTTON_PRESS_MACRO_9         = 145;\n    BUTTON_PRESS_MACRO_10        = 146;\n    BUTTON_PRESS_MACRO_11        = 147;\n    BUTTON_PRESS_MACRO_12        = 148;"
-              c = c.replace(target, addition)
+              c = c.replace(
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;",
+                  "SUSTAIN_SOCD_MODE_ADVANCED_4 = 142;\n    BUTTON_PRESS_MACRO_7         = 143;\n    BUTTON_PRESS_MACRO_8         = 144;"
+              )
               with open("proto/enums.proto", "w", encoding="utf-8") as f:
                   f.write(c)
 
@@ -214,38 +205,14 @@ jobs:
           with open("src/addons/input_macro.cpp", "r", encoding="utf-8") as f:
               c = f.read()
           if "BUTTON_PRESS_MACRO_7" not in c:
-              avail_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:\n                return true;"
-              avail_new = """            case GpioAction::BUTTON_PRESS_MACRO_6:
-            case GpioAction::BUTTON_PRESS_MACRO_7:
-            case GpioAction::BUTTON_PRESS_MACRO_8:
-            case GpioAction::BUTTON_PRESS_MACRO_9:
-            case GpioAction::BUTTON_PRESS_MACRO_10:
-            case GpioAction::BUTTON_PRESS_MACRO_11:
-            case GpioAction::BUTTON_PRESS_MACRO_12:
-                return true;"""
-              c = c.replace(avail_old, avail_new)
-
-              setup_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;"
-              setup_new = setup_old + """
-            case GpioAction::BUTTON_PRESS_MACRO_7:
-                macroPinMasks[6] = Mask_t{1} << pin;
-                break;
-            case GpioAction::BUTTON_PRESS_MACRO_8:
-                macroPinMasks[7] = Mask_t{1} << pin;
-                break;
-            case GpioAction::BUTTON_PRESS_MACRO_9:
-                macroPinMasks[8] = Mask_t{1} << pin;
-                break;
-            case GpioAction::BUTTON_PRESS_MACRO_10:
-                macroPinMasks[9] = Mask_t{1} << pin;
-                break;
-            case GpioAction::BUTTON_PRESS_MACRO_11:
-                macroPinMasks[10] = Mask_t{1} << pin;
-                break;
-            case GpioAction::BUTTON_PRESS_MACRO_12:
-                macroPinMasks[11] = Mask_t{1} << pin;
-                break;"""
-              c = c.replace(setup_old, setup_new)
+              c = c.replace(
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                return true;",
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                return true;"
+              )
+              c = c.replace(
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;",
+                  "case GpioAction::BUTTON_PRESS_MACRO_6:\n                macroPinMasks[5] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n                macroPinMasks[6] = Mask_t{1} << pin;\n                break;\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n                macroPinMasks[7] = Mask_t{1} << pin;\n                break;"
+              )
               with open("src/addons/input_macro.cpp", "w", encoding="utf-8") as f:
                   f.write(c)
 
@@ -255,44 +222,19 @@ jobs:
           old_list = """const static GpioAction actionList[6] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
                                                     GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
                                                     GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6 };"""
-          new_list = """const static GpioAction actionList[MAX_MACRO_LIMIT] = { GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
-                                                    GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
-                                                    GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6,
-                                                    GpioAction::BUTTON_PRESS_MACRO_7, GpioAction::BUTTON_PRESS_MACRO_8,
-                                                    GpioAction::BUTTON_PRESS_MACRO_9, GpioAction::BUTTON_PRESS_MACRO_10,
-                                                    GpioAction::BUTTON_PRESS_MACRO_11, GpioAction::BUTTON_PRESS_MACRO_12 };"""
+          new_list = """const static GpioAction actionList[MAX_MACRO_LIMIT] = {
+            GpioAction::BUTTON_PRESS_MACRO_1, GpioAction::BUTTON_PRESS_MACRO_2,
+            GpioAction::BUTTON_PRESS_MACRO_3, GpioAction::BUTTON_PRESS_MACRO_4,
+            GpioAction::BUTTON_PRESS_MACRO_5, GpioAction::BUTTON_PRESS_MACRO_6,
+            GpioAction::BUTTON_PRESS_MACRO_7, GpioAction::BUTTON_PRESS_MACRO_8 };"""
           c = c.replace(old_list, new_list)
           with open("src/config_utils.cpp", "w", encoding="utf-8") as f:
               f.write(c)
-
-          # 6. headers/display/ui/screens/PinViewerScreen.h
-          with open("headers/display/ui/screens/PinViewerScreen.h", "r", encoding="utf-8") as f:
-              c = f.read()
-          pv_old = '{GpioAction::BUTTON_PRESS_MACRO_6, "M6"},'
-          pv_new = pv_old + '\n            {GpioAction::BUTTON_PRESS_MACRO_7, "M7"},\n            {GpioAction::BUTTON_PRESS_MACRO_8, "M8"},\n            {GpioAction::BUTTON_PRESS_MACRO_9, "M9"},\n            {GpioAction::BUTTON_PRESS_MACRO_10, "M10"},\n            {GpioAction::BUTTON_PRESS_MACRO_11, "M11"},\n            {GpioAction::BUTTON_PRESS_MACRO_12, "M12"},'
-          c = c.replace(pv_old, pv_new)
-          with open("headers/display/ui/screens/PinViewerScreen.h", "w", encoding="utf-8") as f:
-              f.write(c)
-
-          # 7. src/display/ui/screens/ButtonLayoutScreen.cpp
-          with open("src/display/ui/screens/ButtonLayoutScreen.cpp", "r", encoding="utf-8") as f:
-              c = f.read()
-          bl_old = "            case GpioAction::BUTTON_PRESS_MACRO_6:"
-          bl_new = bl_old + "\n            case GpioAction::BUTTON_PRESS_MACRO_7:\n            case GpioAction::BUTTON_PRESS_MACRO_8:\n            case GpioAction::BUTTON_PRESS_MACRO_9:\n            case GpioAction::BUTTON_PRESS_MACRO_10:\n            case GpioAction::BUTTON_PRESS_MACRO_11:\n            case GpioAction::BUTTON_PRESS_MACRO_12:"
-          c = c.replace(bl_old, bl_new)
-          with open("src/display/ui/screens/ButtonLayoutScreen.cpp", "w", encoding="utf-8") as f:
-              f.write(c)
-
-          # 8. src/webconfig.cpp (Payload-Limit für 12 Makros verdoppeln)
-          with open("src/webconfig.cpp", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("#define LWIP_HTTPD_POST_MAX_PAYLOAD_LEN (1024 * 16)", "#define LWIP_HTTPD_POST_MAX_PAYLOAD_LEN (1024 * 32)")
-          with open("src/webconfig.cpp", "w", encoding="utf-8") as f:
-              f.write(c)
+          EOF
 
       - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
-        with:
+        with: 
           release: '15.3.Rel1'
 
       - name: Checkout pico-sdk/2.3.1
@@ -303,14 +245,14 @@ jobs:
           path: pico-sdk
 
       - name: Checkout pico-sdk submodules
-        working-directory: ${{github.workspace}}/pico-sdk
+        working-directory: \${{github.workspace}}/pico-sdk
         run: git submodule update --init
 
-      - name: Download Web UI Build Artifact (fsData)
+      - name: Download Web Build Artifact
         uses: actions/download-artifact@v7.0.0
         with:
           name: fsData
-          path: ${{github.workspace}}/lib/httpd/
+          path: \${{github.workspace}}/lib/httpd/
 
       - name: Get core count
         id: core_count
@@ -322,19 +264,4 @@ jobs:
 
       - name: Pico Build
         shell: bash
-        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel ${{steps.core_count.outputs.output}}
-
-      - name: Upload Pico Artifact
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
-          if-no-files-found: error
-
-      - name: Upload .elf Artifact
-        if: ${{ matrix.GP2040_BOARDCONFIG == 'Pico'}}
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: elf
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
-          if-no-files-found: error
+        run: GP204
