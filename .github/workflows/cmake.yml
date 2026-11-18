@@ -1,4 +1,4 @@
-name: CMake (8 Macros All-in-One)
+name: CMake (8 Macros Safe RAM & EEPROM)
 
 on:
   push:
@@ -168,17 +168,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Patch Firmware & EEPROM Size for 8 Macro Slots
+      - name: Patch Firmware for 8 Macro Slots (Safe 32KB EEPROM)
         run: |
           python3 - << 'EOF'
-          # 0. lib/FlashPROM/src/FlashPROM.h (EEPROM von 32KB auf 64KB erweitern gegen static_assert Fehler)
-          with open("lib/FlashPROM/src/FlashPROM.h", "r", encoding="utf-8") as f:
-              c = f.read()
-          c = c.replace("#define EEPROM_SIZE_BYTES    0x8000", "#define EEPROM_SIZE_BYTES    0x10000")
-          c = c.replace("#define EEPROM_ADDRESS_START _u(0x101F8000)", "#define EEPROM_ADDRESS_START _u(0x101F0000)")
-          with open("lib/FlashPROM/src/FlashPROM.h", "w", encoding="utf-8") as f:
-              f.write(c)
-
           # 1. headers/addons/input_macro.h
           with open("headers/addons/input_macro.h", "r", encoding="utf-8") as f:
               c = f.read()
@@ -189,12 +181,15 @@ jobs:
           with open("headers/addons/input_macro.h", "w", encoding="utf-8") as f:
               f.write(c)
 
-          # 2. proto/config.proto
+          # 2. proto/config.proto (8 Makros + Platz im 32KB-Limit schaffen ohne FlashPROM.h anzufassen!)
           with open("proto/config.proto", "r", encoding="utf-8") as f:
               c = f.read()
           c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 6];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
           c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 10];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
           c = c.replace("repeated Macro macroList = 3 [(nanopb).max_count = 12];", "repeated Macro macroList = 3 [(nanopb).max_count = 8];")
+          # Platz im Protobuf sparen, damit Config_size locker unter 32768 Bytes (0x8000) bleibt:
+          c = c.replace("optional string macroLabel = 2 [(nanopb).max_length = 64];", "optional string macroLabel = 2 [(nanopb).max_length = 32];")
+          c = c.replace("repeated LightCluster lightClusterData = 40 [(nanopb).max_count = 100];", "repeated LightCluster lightClusterData = 40 [(nanopb).max_count = 60];")
           with open("proto/config.proto", "w", encoding="utf-8") as f:
               f.write(c)
 
