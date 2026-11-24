@@ -1,0 +1,482 @@
+name: GP2040-CE Build (16 Makros Option A + Web-Build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      board_config:
+        description: "Board-Konfiguration (Standard: Pico2; leer lassen fuer ALLE Boards)"
+        required: false
+        default: "Pico2"
+        type: choice
+        options:
+          - Pico2
+          - Pico
+          - PicoW
+          - WaveshareRP2350BPlusW
+          - WaveshareZero
+          - PimoroniPicoPlus2
+          - ARCController
+          - ASiLVLABC
+          - ASiLVLWASD
+          - Blank
+          - BentoBox
+          - FlatboxRev4
+          - FlatboxRev5
+          - FlatboxRev5RGB
+          - FlatboxRev5USBPassthrough
+          - FlatboxRev5Southpaw
+          - FlatboxRev8
+          - Granola
+          - GranolaBeacon
+          - AdafruitKB2040
+          - KeyboardConverter
+          - Haute42COSMOX
+          - Haute42COSMOXCAS
+          - Haute42COSMOXCAT
+          - Haute42COSMOXMLite
+          - Haute42COSMOXMUltra
+          - Haute42COSMOXXAnalog
+          - Liatris
+          - MavercadeRev1
+          - MavercadeRev2
+          - MavercadeRev3
+          - MiSTercadeV2
+          - OpenCore0
+          - OpenCore0MIXUP
+          - OpenCore0WASD
+          - OSUMGP-RP2040
+          - PicoFightingBoard
+          - PXPGamepad
+          - ReflexCtrlGenesis6
+          - ReflexCtrlNES
+          - ReflexCtrlSaturn
+          - ReflexCtrlSNES
+          - ReflexCtrlVB
+          - ReflexEncodeV1.2
+          - ReflexEncodeV2.0
+          - RP2040AdvancedBreakoutBoard
+          - RP2040AdvancedBreakoutBoardUSBPassthrough
+          - RP2040MiniBreakoutBoard
+          - RP2040MiniBreakoutBoardUSBPassthrough
+          - SeeedXIAORP2040
+          - SparkFunProMicro
+          - SparkFunProMicroRP2350
+          - SGFDevices
+          - ZeroRhythm
+          - ""
+      apply_16_macros_patch:
+        description: "16-Makros-Patch (Option A: 30 Steps, erweitertes EEPROM & 32KB Web-Puffer) anwenden"
+        required: false
+        default: true
+        type: boolean
+      extra_patch_file:
+        description: "Optionaler Pfad zu einem zusaetzlichen Patch im Repo (z.B. wifi_bl.patch)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ============================================================================
+  # 1. Board-Matrix bestimmen
+  # ============================================================================
+  build-config-list:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout GP2040-CE
+        uses: actions/checkout@v6.0.1
+
+      - name: Board-Matrix generieren
+        id: set-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.board_config }}" ]; then
+            printf 'matrix=["%s"]\n' "${{ github.event.inputs.board_config }}" >> "$GITHUB_OUTPUT"
+          else
+            CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
+            echo "matrix=$CONFIG_DIRS" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ============================================================================
+  # 2. Patch anwenden & Web-Configurator bauen (Node.js -> lib/httpd/fsdata.c)
+  # ============================================================================
+  build-web:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout GP2040-CE
+        uses: actions/checkout@v6.0.1
+
+      - name: 16_macros_optionA.patch erstellen & anwenden
+        if: ${{ github.event.inputs.apply_16_macros_patch != 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Falls im Repo bereits eine eigene 16_macros_optionA.patch liegt, wird diese genutzt.
+          # Andernfalls wird der eingebettete Option-A-Patch (13 Dateien, Base64-geschuetzt) entpackt.
+          if [ ! -f "16_macros_optionA.patch" ]; then
+            base64 -d << 'EOF_PATCH_B64' > 16_macros_optionA.patch
+          LS0tIGEvaGVhZGVycy9hZGRvbnMvaW5wdXRfbWFjcm8uaAorKysgYi9oZWFkZXJzL2FkZG9ucy9p
+          bnB1dF9tYWNyby5oCkBAIC0yNiw3ICsyNiw3IEBACiAjZW5kaWYKIAogI2RlZmluZSBNQVhfTUFD
+          Uk9fSU5QVVRfTElNSVQgMzAKLSNkZWZpbmUgTUFYX01BQ1JPX0xJTUlUIDYKKyNkZWZpbmUgTUFY
+          X01BQ1JPX0xJTUlUIDE2CiAjZGVmaW5lIElOUFVUX0hPTERfVVMgMTY2NjYKIAogLy8gSW5wdXQg
+          TWFjcm8gTW9kdWxlIE5hbWUKQEAgLTUxLDcgKzUxLDcgQEAKICAgICBib29sIGlzTWFjcm9Ucmln
+          Z2VySGVsZDsKICAgICBpbnQgbWFjcm9Qb3NpdGlvbjsKICAgICBNYXNrX3QgbWFjcm9CdXR0b25N
+          YXNrOwotICAgIE1hc2tfdCBtYWNyb1Bpbk1hc2tzWzZdOworICAgIE1hc2tfdCBtYWNyb1Bpbk1h
+          c2tzW01BWF9NQUNST19MSU1JVF07CiAgICAgdWludDY0X3QgbWFjcm9TdGFydFRpbWU7CiAgICAg
+          dWludDY0X3QgY3VycmVudE1pY3JvczsKICAgICBpbnQgcHJlc3NlZE1hY3JvOwotLS0gYS9zcmMv
+          YWRkb25zL2lucHV0X21hY3JvLmNwcAorKysgYi9zcmMvYWRkb25zL2lucHV0X21hY3JvLmNwcApA
+          QCAtMTcsNiArMTcsMTYgQEAKICAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BS
+          RVNTX01BQ1JPXzQ6CiAgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19N
+          QUNST181OgogICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9f
+          NjoKKyAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzc6Cisg
+          ICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST184OgorICAgICAg
+          ICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fOToKKyAgICAgICAgICAg
+          IGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzEwOgorICAgICAgICAgICAgY2Fz
+          ZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTE6CisgICAgICAgICAgICBjYXNlIEdw
+          aW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMjoKKyAgICAgICAgICAgIGNhc2UgR3Bpb0Fj
+          dGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzEzOgorICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9u
+          OjpCVVRUT05fUFJFU1NfTUFDUk9fMTQ6CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJV
+          VFRPTl9QUkVTU19NQUNST18xNToKKyAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9O
+          X1BSRVNTX01BQ1JPXzE2OgogICAgICAgICAgICAgICAgIHJldHVybiB0cnVlOwogICAgICAgICAg
+          ICAgZGVmYXVsdDoKICAgICAgICAgICAgICAgICBicmVhazsKQEAgLTUyLDYgKzYyLDM2IEBACiAg
+          ICAgICAgICAgICAgICAgYnJlYWs7CiAgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRP
+          Tl9QUkVTU19NQUNST182OgogICAgICAgICAgICAgICAgIG1hY3JvUGluTWFza3NbNV0gPSBNYXNr
+          X3R7MX0gPDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBH
+          cGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNzoKKyAgICAgICAgICAgICAgICBtYWNyb1Bp
+          bk1hc2tzWzZdID0gTWFza190ezF9IDw8IHBpbjsKKyAgICAgICAgICAgICAgICBicmVhazsKKyAg
+          ICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzg6CisgICAgICAg
+          ICAgICAgICAgbWFjcm9QaW5NYXNrc1s3XSA9IE1hc2tfdHsxfSA8PCBwaW47CisgICAgICAgICAg
+          ICAgICAgYnJlYWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19N
+          QUNST185OgorICAgICAgICAgICAgICAgIG1hY3JvUGluTWFza3NbOF0gPSBNYXNrX3R7MX0gPDwg
+          cGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9u
+          OjpCVVRUT05fUFJFU1NfTUFDUk9fMTA6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5NYXNrc1s5
+          XSA9IE1hc2tfdHsxfSA8PCBwaW47CisgICAgICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAg
+          ICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMToKKyAgICAgICAgICAgICAg
+          ICBtYWNyb1Bpbk1hc2tzWzEwXSA9IE1hc2tfdHsxfSA8PCBwaW47CisgICAgICAgICAgICAgICAg
+          YnJlYWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18x
+          MjoKKyAgICAgICAgICAgICAgICBtYWNyb1Bpbk1hc2tzWzExXSA9IE1hc2tfdHsxfSA8PCBwaW47
+          CisgICAgICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJV
+          VFRPTl9QUkVTU19NQUNST18xMzoKKyAgICAgICAgICAgICAgICBtYWNyb1Bpbk1hc2tzWzEyXSA9
+          IE1hc2tfdHsxfSA8PCBwaW47CisgICAgICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAgICBj
+          YXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNDoKKyAgICAgICAgICAgICAgICBt
+          YWNyb1Bpbk1hc2tzWzEzXSA9IE1hc2tfdHsxfSA8PCBwaW47CisgICAgICAgICAgICAgICAgYnJl
+          YWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNToK
+          KyAgICAgICAgICAgICAgICBtYWNyb1Bpbk1hc2tzWzE0XSA9IE1hc2tfdHsxfSA8PCBwaW47Cisg
+          ICAgICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRP
+          Tl9QUkVTU19NQUNST18xNjoKKyAgICAgICAgICAgICAgICBtYWNyb1Bpbk1hc2tzWzE1XSA9IE1h
+          c2tfdHsxfSA8PCBwaW47CiAgICAgICAgICAgICAgICAgYnJlYWs7CiAgICAgICAgICAgICBkZWZh
+          dWx0OgogICAgICAgICAgICAgICAgIGJyZWFrOwpAQCAtMjkyLDYgKzMzMiwzNiBAQAogICAgICAg
+          ICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNjoKICAgICAgICAgICAg
+          ICAgICBtYWNyb1Bpbk1hc2tzWzVdID0gTWFza190ezF9IDw8IHBpbjsKICAgICAgICAgICAgICAg
+          ICBicmVhazsKKyAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JP
+          Xzc6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5NYXNrc1s2XSA9IE1hc2tfdHsxfSA8PCBwaW47
+          CisgICAgICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJV
+          VFRPTl9QUkVTU19NQUNST184OgorICAgICAgICAgICAgICAgIG1hY3JvUGluTWFza3NbN10gPSBN
+          YXNrX3R7MX0gPDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2Fz
+          ZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fOToKKyAgICAgICAgICAgICAgICBtYWNy
+          b1Bpbk1hc2tzWzhdID0gTWFza190ezF9IDw8IHBpbjsKKyAgICAgICAgICAgICAgICBicmVhazsK
+          KyAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzEwOgorICAg
+          ICAgICAgICAgICAgIG1hY3JvUGluTWFza3NbOV0gPSBNYXNrX3R7MX0gPDwgcGluOworICAgICAg
+          ICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJF
+          U1NfTUFDUk9fMTE6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5NYXNrc1sxMF0gPSBNYXNrX3R7
+          MX0gPDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBHcGlv
+          QWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTI6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5N
+          YXNrc1sxMV0gPSBNYXNrX3R7MX0gPDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAg
+          ICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTM6CisgICAgICAg
+          ICAgICAgICAgbWFjcm9QaW5NYXNrc1sxMl0gPSBNYXNrX3R7MX0gPDwgcGluOworICAgICAgICAg
+          ICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1Nf
+          TUFDUk9fMTQ6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5NYXNrc1sxM10gPSBNYXNrX3R7MX0g
+          PDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAgICAgICAgY2FzZSBHcGlvQWN0
+          aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTU6CisgICAgICAgICAgICAgICAgbWFjcm9QaW5NYXNr
+          c1sxNF0gPSBNYXNrX3R7MX0gPDwgcGluOworICAgICAgICAgICAgICAgIGJyZWFrOworICAgICAg
+          ICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTY6CisgICAgICAgICAg
+          ICAgICAgbWFjcm9QaW5NYXNrc1sxNV0gPSBNYXNrX3R7MX0gPDwgcGluOworICAgICAgICAgICAg
+          ICAgIGJyZWFrOwogICAgICAgICAgICAgZGVmYXVsdDoKICAgICAgICAgICAgICAgICBicmVhazsK
+          ICAgICAgICAgfQotLS0gYS9zcmMvY29uZmlnX3V0aWxzLmNwcAorKysgYi9zcmMvY29uZmlnX3V0
+          aWxzLmNwcApAQCAtMjIwNiw5ICsyMjA2LDE2IEBACiAgICAgfQogCiAgICAgaWYgKCBtYWNyb09w
+          dGlvbnMubWFjcm9MaXN0X2NvdW50ID09IE1BWF9NQUNST19MSU1JVCApIHsKLSAgICAgICAgY29u
+          c3Qgc3RhdGljIEdwaW9BY3Rpb24gYWN0aW9uTGlzdFs2XSA9IHsgR3Bpb0FjdGlvbjo6QlVUVE9O
+          X1BSRVNTX01BQ1JPXzEsIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18yLAotICAgICAg
+          ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIEdwaW9BY3Rpb246
+          OkJVVFRPTl9QUkVTU19NQUNST18zLCBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNCwK
+          LSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBHcGlv
+          QWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNSwgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01B
+          Q1JPXzYgfTsKKyAgICAgICAgY29uc3Qgc3RhdGljIEdwaW9BY3Rpb24gYWN0aW9uTGlzdFtNQVhf
+          TUFDUk9fTElNSVRdID0geworICAgICAgICAgICAgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01B
+          Q1JPXzEsICBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMiwKKyAgICAgICAgICAgIEdw
+          aW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18zLCAgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNT
+          X01BQ1JPXzQsCisgICAgICAgICAgICBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNSwg
+          IEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST182LAorICAgICAgICAgICAgR3Bpb0FjdGlv
+          bjo6QlVUVE9OX1BSRVNTX01BQ1JPXzcsICBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9f
+          OCwKKyAgICAgICAgICAgIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST185LCAgR3Bpb0Fj
+          dGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzEwLAorICAgICAgICAgICAgR3Bpb0FjdGlvbjo6QlVU
+          VE9OX1BSRVNTX01BQ1JPXzExLCBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTIsCisg
+          ICAgICAgICAgICBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTMsIEdwaW9BY3Rpb246
+          OkJVVFRPTl9QUkVTU19NQUNST18xNCwKKyAgICAgICAgICAgIEdwaW9BY3Rpb246OkJVVFRPTl9Q
+          UkVTU19NQUNST18xNSwgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzE2CisgICAgICAg
+          IH07CiAgICAgICAgIGZvcihpbnQgaSA9IDA7IGkgPCBNQVhfTUFDUk9fTElNSVQ7IGkrKyApIHsK
+          ICAgICAgICAgICAgIGlmICggbWFjcm9PcHRpb25zLm1hY3JvTGlzdFtpXS5oYXNfZGVwcmVjYXRl
+          ZE1hY3JvVHJpZ2dlclBpbiAmJgogICAgICAgICAgICAgICAgICAgICBpc1ZhbGlkUGluKG1hY3Jv
+          T3B0aW9ucy5tYWNyb0xpc3RbaV0uZGVwcmVjYXRlZE1hY3JvVHJpZ2dlclBpbikgKSB7Ci0tLSBh
+          L2hlYWRlcnMvZGlzcGxheS91aS9zY3JlZW5zL1BpblZpZXdlclNjcmVlbi5oCisrKyBiL2hlYWRl
+          cnMvZGlzcGxheS91aS9zY3JlZW5zL1BpblZpZXdlclNjcmVlbi5oCkBAIC02OCw2ICs2OCwxNiBA
+          QAogICAgICAgICAgICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST180LCAiTTQifSwK
+          ICAgICAgICAgICAgIHtHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNSwgIk01In0sCiAg
+          ICAgICAgICAgICB7R3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzYsICJNNiJ9LAorICAg
+          ICAgICAgICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST183LCAiTTcifSwKKyAgICAg
+          ICAgICAgIHtHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fOCwgIk04In0sCisgICAgICAg
+          ICAgICB7R3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzksICJNOSJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMCwgIk0xMCJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMSwgIk0xMSJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMiwgIk0xMiJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMywgIk0xMyJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNCwgIk0xNCJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNSwgIk0xNSJ9LAorICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNiwgIk0xNiJ9LAogICAgICAgICAg
+          ICAge0dwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19BMywgIkEzIn0sCiAgICAgICAgICAgICB7R3Bp
+          b0FjdGlvbjo6QlVUVE9OX1BSRVNTX0E0LCAiQTQifSwKICAgICAgICAgICAgIHtHcGlvQWN0aW9u
+          OjpCVVRUT05fUFJFU1NfRTEsICJFMSJ9LAotLS0gYS9zcmMvZGlzcGxheS91aS9zY3JlZW5zL0J1
+          dHRvbkxheW91dFNjcmVlbi5jcHAKKysrIGIvc3JjL2Rpc3BsYXkvdWkvc2NyZWVucy9CdXR0b25M
+          YXlvdXRTY3JlZW4uY3BwCkBAIC03MCw2ICs3MCwxNiBAQAogICAgICAgICAgICAgY2FzZSBHcGlv
+          QWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fNDoKICAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlv
+          bjo6QlVUVE9OX1BSRVNTX01BQ1JPXzU6CiAgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJV
+          VFRPTl9QUkVTU19NQUNST182OgorICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05f
+          UFJFU1NfTUFDUk9fNzoKKyAgICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNT
+          X01BQ1JPXzg6CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNS
+          T185OgorICAgICAgICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTA6
+          CisgICAgICAgICAgICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xMToKKyAg
+          ICAgICAgICAgIGNhc2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzEyOgorICAgICAg
+          ICAgICAgY2FzZSBHcGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTM6CisgICAgICAgICAg
+          ICBjYXNlIEdwaW9BY3Rpb246OkJVVFRPTl9QUkVTU19NQUNST18xNDoKKyAgICAgICAgICAgIGNh
+          c2UgR3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX01BQ1JPXzE1OgorICAgICAgICAgICAgY2FzZSBH
+          cGlvQWN0aW9uOjpCVVRUT05fUFJFU1NfTUFDUk9fMTY6CiAgICAgICAgICAgICAgICAgbWFjcm9F
+          bmFibGVkID0gdHJ1ZTsKICAgICAgICAgICAgICAgICBicmVhazsKICAgICAgICAgICAgIGNhc2Ug
+          R3Bpb0FjdGlvbjo6QlVUVE9OX1BSRVNTX1RVUkJPOgotLS0gYS9wcm90by9jb25maWcucHJvdG8K
+          KysrIGIvcHJvdG8vY29uZmlnLnByb3RvCkBAIC04NzQsNyArODc0LDcgQEAKIHsKICAgICBvcHRp
+          b25hbCBib29sIGVuYWJsZWQgPSAxOwogICAgIG9wdGlvbmFsIGludDMyIGRlcHJlY2F0ZWRQaW4g
+          PSAyIFtkZXByZWNhdGVkID0gdHJ1ZV07Ci0gICAgcmVwZWF0ZWQgTWFjcm8gbWFjcm9MaXN0ID0g
+          MyBbKG5hbm9wYikubWF4X2NvdW50ID0gNl07CisgICAgcmVwZWF0ZWQgTWFjcm8gbWFjcm9MaXN0
+          ID0gMyBbKG5hbm9wYikubWF4X2NvdW50ID0gMTZdOwogICAgIG9wdGlvbmFsIGJvb2wgbWFjcm9C
+          b2FyZExlZEVuYWJsZWQgPSA0OwogfQogCi0tLSBhL3Byb3RvL2VudW1zLnByb3RvCisrKyBiL3By
+          b3RvL2VudW1zLnByb3RvCkBAIC0zOTMsNiArMzkzLDE3IEBACiAgICAgU1VTVEFJTl9TT0NEX01P
+          REVfQURWQU5DRURfMiA9IDE0MDsKICAgICBTVVNUQUlOX1NPQ0RfTU9ERV9BRFZBTkNFRF8zID0g
+          MTQxOwogICAgIFNVU1RBSU5fU09DRF9NT0RFX0FEVkFOQ0VEXzQgPSAxNDI7CisKKyAgICBCVVRU
+          T05fUFJFU1NfTUFDUk9fNyAgPSAxNDM7CisgICAgQlVUVE9OX1BSRVNTX01BQ1JPXzggID0gMTQ0
+          OworICAgIEJVVFRPTl9QUkVTU19NQUNST185ICA9IDE0NTsKKyAgICBCVVRUT05fUFJFU1NfTUFD
+          Uk9fMTAgPSAxNDY7CisgICAgQlVUVE9OX1BSRVNTX01BQ1JPXzExID0gMTQ3OworICAgIEJVVFRP
+          Tl9QUkVTU19NQUNST18xMiA9IDE0ODsKKyAgICBCVVRUT05fUFJFU1NfTUFDUk9fMTMgPSAxNDk7
+          CisgICAgQlVUVE9OX1BSRVNTX01BQ1JPXzE0ID0gMTUwOworICAgIEJVVFRPTl9QUkVTU19NQUNS
+          T18xNSA9IDE1MTsKKyAgICBCVVRUT05fUFJFU1NfTUFDUk9fMTYgPSAxNTI7CiB9CiAKIGVudW0g
+          R3Bpb0RpcmVjdGlvbgotLS0gYS9saWIvRmxhc2hQUk9NL3NyYy9GbGFzaFBST00uaAorKysgYi9s
+          aWIvRmxhc2hQUk9NL3NyYy9GbGFzaFBST00uaApAQCAtMTMsOCArMTMsMTMgQEAKICNpbmNsdWRl
+          IDxoYXJkd2FyZS9mbGFzaC5oPgogI2luY2x1ZGUgPGhhcmR3YXJlL3RpbWVyLmg+CiAKLSNkZWZp
+          bmUgRUVQUk9NX1NJWkVfQllURVMgICAgMHg4MDAwICAgICAgICAgICAvLyBSZXNlcnZlIDMyayBv
+          ZiBmbGFzaCBtZW1vcnkgKGVuc3VyZSB0aGlzIHZhbHVlIGlzIGRpdmlzaWJsZSBieSAyNTYpCi0j
+          ZGVmaW5lIEVFUFJPTV9BRERSRVNTX1NUQVJUIF91KDB4MTAxRjgwMDApIC8vIFRoZSBhcmR1aW5v
+          LXBpY28gRUVQUk9NIGxpYiBzdGFydHMgaGVyZSwgc28gd2UnbGwgZG8gdGhlIHNhbWUKKyNpZmRl
+          ZiBQSUNPX1JQMjM1MAorI2RlZmluZSBFRVBST01fU0laRV9CWVRFUyAgICAweDEwMDAwICAgICAg
+          ICAgIC8vIFJlc2VydmUgNjRrIG9mIGZsYXNoIG1lbW9yeSBvbiBSUDIzNTAgKGRpdmlzaWJsZSBi
+          eSA0MDk2KQorI2RlZmluZSBFRVBST01fQUREUkVTU19TVEFSVCBfdSgweDEwMUYwMDAwKSAgIC8v
+          IEVuZHMgY2xlYW5seSBhdCAweDEwMjAwMDAwCisjZWxzZQorI2RlZmluZSBFRVBST01fU0laRV9C
+          WVRFUyAgICAweEMwMDAgICAgICAgICAgIC8vIFJlc2VydmUgNDhrIG9mIGZsYXNoIG1lbW9yeSBv
+          biBSUDIwNDAgKGRpdmlzaWJsZSBieSA0MDk2KQorI2RlZmluZSBFRVBST01fQUREUkVTU19TVEFS
+          VCBfdSgweDEwMUY0MDAwKSAgIC8vIEVuZHMgY2xlYW5seSBhdCAweDEwMjAwMDAwCisjZW5kaWYK
+          IAogLy8gV2FybmluZzogSWYgdGhlIHdyaXRlIHdhaXQgaXMgdG9vIGxvbmcgaXQgY2FuIHN0YWxs
+          IG90aGVyIHByb2Nlc3NlcwogI2RlZmluZSBFRVBST01fV1JJVEVfV0FJVCAgICA1MCAgICAgICAg
+          ICAgICAvLyBBbW91bnQgb2YgdGltZSBpbiBtcyB0byB3YWl0IGJlZm9yZSBibG9ja2luZyBjb3Jl
+          MSBhbmQgY29tbWl0dGluZyB0byBmbGFzaAotLS0gYS9zcmMvd2ViY29uZmlnLmNwcAorKysgYi9z
+          cmMvd2ViY29uZmlnLmNwcApAQCAtNDMsNyArNDMsNyBAQAogCiAjZGVmaW5lIFBBVEhfQ0dJX0FD
+          VElPTiAiL2NnaS9hY3Rpb24iCiAKLSNkZWZpbmUgTFdJUF9IVFRQRF9QT1NUX01BWF9QQVlMT0FE
+          X0xFTiAoMTAyNCAqIDE2KQorI2RlZmluZSBMV0lQX0hUVFBEX1BPU1RfTUFYX1BBWUxPQURfTEVO
+          ICgxMDI0ICogMzIpCiAKICNkZWZpbmUgTUFYX01BUFBFRF9JTlBVVF9NT0RFUyA4CiAKLS0tIGEv
+          d3d3L3NyYy9QYWdlcy9JbnB1dE1hY3JvQWRkb25QYWdlLnRzeAorKysgYi93d3cvc3JjL1BhZ2Vz
+          L0lucHV0TWFjcm9BZGRvblBhZ2UudHN4CkBAIC0zNCw3ICszNCw3IEBACiAJeyBsYWJlbDogJ0lu
+          cHV0TWFjcm9BZGRvbjppbnB1dC1tYWNyby10eXBlLnRvZ2dsZScsIHZhbHVlOiAzIH0sCiBdOwog
+          Y29uc3QgTUFDUk9fSU5QVVRTX01BWCA9IDMwOwotY29uc3QgTUFDUk9fTElNSVQgPSA2OworY29u
+          c3QgTUFDUk9fTElNSVQgPSAxNjsKIAogY29uc3Qgc2NoZW1hID0geXVwLm9iamVjdCgpLnNoYXBl
+          KHsKIAltYWNyb0xpc3Q6IHl1cC5hcnJheSgpLm9mKAotLS0gYS93d3cvc3JjL0xvY2FsZXMvZGUt
+          REUvUGluTWFwcGluZy5qc3gKKysrIGIvd3d3L3NyYy9Mb2NhbGVzL2RlLURFL1Bpbk1hcHBpbmcu
+          anN4CkBAIC00Niw1ICs0NiwxNSBAQAogCQlCVVRUT05fUFJFU1NfTUFDUk9fNDogJ01ha3JvIDQn
+          LAogCQlCVVRUT05fUFJFU1NfTUFDUk9fNTogJ01ha3JvIDUnLAogCQlCVVRUT05fUFJFU1NfTUFD
+          Uk9fNjogJ01ha3JvIDYnLAorCQlCVVRUT05fUFJFU1NfTUFDUk9fNzogJ01ha3JvIDcnLAorCQlC
+          VVRUT05fUFJFU1NfTUFDUk9fODogJ01ha3JvIDgnLAorCQlCVVRUT05fUFJFU1NfTUFDUk9fOTog
+          J01ha3JvIDknLAorCQlCVVRUT05fUFJFU1NfTUFDUk9fMTA6ICdNYWtybyAxMCcsCisJCUJVVFRP
+          Tl9QUkVTU19NQUNST18xMTogJ01ha3JvIDExJywKKwkJQlVUVE9OX1BSRVNTX01BQ1JPXzEyOiAn
+          TWFrcm8gMTInLAorCQlCVVRUT05fUFJFU1NfTUFDUk9fMTM6ICdNYWtybyAxMycsCisJCUJVVFRP
+          Tl9QUkVTU19NQUNST18xNDogJ01ha3JvIDE0JywKKwkJQlVUVE9OX1BSRVNTX01BQ1JPXzE1OiAn
+          TWFrcm8gMTUnLAorCQlCVVRUT05fUFJFU1NfTUFDUk9fMTY6ICdNYWtybyAxNicsCiAJfSwKIH07
+          Ci0tLSBhL3d3dy9zcmMvTG9jYWxlcy9lbi9QaW5NYXBwaW5nLmpzeAorKysgYi93d3cvc3JjL0xv
+          Y2FsZXMvZW4vUGluTWFwcGluZy5qc3gKQEAgLTc1LDYgKzc1LDE2IEBACiAJCUJVVFRPTl9QUkVT
+          U19NQUNST180OiAnTWFjcm8gNCcsCiAJCUJVVFRPTl9QUkVTU19NQUNST181OiAnTWFjcm8gNScs
+          CiAJCUJVVFRPTl9QUkVTU19NQUNST182OiAnTWFjcm8gNicsCisJCUJVVFRPTl9QUkVTU19NQUNS
+          T183OiAnTWFjcm8gNycsCisJCUJVVFRPTl9QUkVTU19NQUNST184OiAnTWFjcm8gOCcsCisJCUJV
+          VFRPTl9QUkVTU19NQUNST185OiAnTWFjcm8gOScsCisJCUJVVFRPTl9QUkVTU19NQUNST18xMDog
+          J01hY3JvIDEwJywKKwkJQlVUVE9OX1BSRVNTX01BQ1JPXzExOiAnTWFjcm8gMTEnLAorCQlCVVRU
+          T05fUFJFU1NfTUFDUk9fMTI6ICdNYWNybyAxMicsCisJCUJVVFRPTl9QUkVTU19NQUNST18xMzog
+          J01hY3JvIDEzJywKKwkJQlVUVE9OX1BSRVNTX01BQ1JPXzE0OiAnTWFjcm8gMTQnLAorCQlCVVRU
+          T05fUFJFU1NfTUFDUk9fMTU6ICdNYWNybyAxNScsCisJCUJVVFRPTl9QUkVTU19NQUNST18xNjog
+          J01hY3JvIDE2JywKIAkJQ1VTVE9NX0JVVFRPTl9DT01CTzogJ0Fzc2lnbmVkIHRvIG11bHRpIG1h
+          cHBpbmcnLAogCQlCVVRUT05fUFJFU1NfRTE6ICdFeHRyYSAxJywKIAkJQlVUVE9OX1BSRVNTX0Uy
+          OiAnRXh0cmEgMicsCi0tLSBhL3d3dy9zcmMvTG9jYWxlcy9lbi9Qcm90by9HcGlvQWN0aW9uLmpz
+          eAorKysgYi93d3cvc3JjL0xvY2FsZXMvZW4vUHJvdG8vR3Bpb0FjdGlvbi5qc3gKQEAgLTQ3LDYg
+          KzQ3LDE2IEBACiAJQlVUVE9OX1BSRVNTX01BQ1JPXzQ6ICdNYWNybyA0JywKIAlCVVRUT05fUFJF
+          U1NfTUFDUk9fNTogJ01hY3JvIDUnLAogCUJVVFRPTl9QUkVTU19NQUNST182OiAnTWFjcm8gNics
+          CisJQlVUVE9OX1BSRVNTX01BQ1JPXzc6ICdNYWNybyA3JywKKwlCVVRUT05fUFJFU1NfTUFDUk9f
+          ODogJ01hY3JvIDgnLAorCUJVVFRPTl9QUkVTU19NQUNST185OiAnTWFjcm8gOScsCisJQlVUVE9O
+          X1BSRVNTX01BQ1JPXzEwOiAnTWFjcm8gMTAnLAorCUJVVFRPTl9QUkVTU19NQUNST18xMTogJ01h
+          Y3JvIDExJywKKwlCVVRUT05fUFJFU1NfTUFDUk9fMTI6ICdNYWNybyAxMicsCisJQlVUVE9OX1BS
+          RVNTX01BQ1JPXzEzOiAnTWFjcm8gMTMnLAorCUJVVFRPTl9QUkVTU19NQUNST18xNDogJ01hY3Jv
+          IDE0JywKKwlCVVRUT05fUFJFU1NfTUFDUk9fMTU6ICdNYWNybyAxNScsCisJQlVUVE9OX1BSRVNT
+          X01BQ1JPXzE2OiAnTWFjcm8gMTYnLAogCUNVU1RPTV9CVVRUT05fQ09NQk86ICdBc3NpZ25lZCB0
+          byBtdWx0aSBtYXBwaW5nJywKIAlCVVRUT05fUFJFU1NfRTE6ICdFeHRyYSAxJywKIAlCVVRUT05f
+          UFJFU1NfRTI6ICdFeHRyYSAyJywK
+          EOF_PATCH_B64
+          fi
+
+          if grep -q "MAX_MACRO_LIMIT 16" headers/addons/input_macro.h 2>/dev/null; then
+            echo "16_macros_optionA.patch ist bereits im Code aktiv."
+          else
+            echo "Wende 16_macros_optionA.patch an..."
+            git apply --verbose 16_macros_optionA.patch
+          fi
+
+          if [ -n "${{ github.event.inputs.extra_patch_file }}" ]; then
+            echo "Wende Zusatz-Patch '${{ github.event.inputs.extra_patch_file }}' an..."
+            git apply --verbose "${{ github.event.inputs.extra_patch_file }}"
+          fi
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v6.1.0
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: www/package-lock.json
+
+      - name: Clean install (www)
+        working-directory: ${{ github.workspace }}/www
+        run: npm ci
+
+      - name: Build WWW (build-proto + vite + makefsdata)
+        working-directory: ${{ github.workspace }}/www
+        run: CI=false npm run build --if-present
+
+      - name: Upload fsdata.c Artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: fsData
+          path: ${{ github.workspace }}/lib/httpd/fsdata.c
+          if-no-files-found: error
+
+      - name: Upload 16_macros_optionA.patch Artifact
+        if: ${{ github.event.inputs.apply_16_macros_patch != 'false' }}
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: patchFile
+          path: ${{ github.workspace }}/16_macros_optionA.patch
+          if-no-files-found: error
+
+  # ============================================================================
+  # 3. C++ Firmware kompilieren (CMake + Pico SDK 2.3.1 -> .uf2)
+  # ============================================================================
+  build-firmware:
+    needs: [build-web, build-config-list]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        GP2040_BOARDCONFIG: ${{ fromJSON(needs.build-config-list.outputs.matrix) }}
+    steps:
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.x"
+
+      - name: Verify CMake
+        run: cmake --version
+
+      - name: Checkout GP2040-CE
+        uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download 16_macros_optionA.patch Artifact
+        if: ${{ github.event.inputs.apply_16_macros_patch != 'false' }}
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: patchFile
+          path: ${{ github.workspace }}
+
+      - name: Patch auf C++ / Protobuf Quellen anwenden
+        if: ${{ github.event.inputs.apply_16_macros_patch != 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q "MAX_MACRO_LIMIT 16" headers/addons/input_macro.h 2>/dev/null; then
+            echo "16_macros_optionA.patch ist bereits im Code aktiv."
+          else
+            echo "Wende 16_macros_optionA.patch an..."
+            git apply --verbose 16_macros_optionA.patch
+          fi
+
+          if [ -n "${{ github.event.inputs.extra_patch_file }}" ]; then
+            echo "Wende Zusatz-Patch '${{ github.event.inputs.extra_patch_file }}' an..."
+            git apply --verbose "${{ github.event.inputs.extra_patch_file }}"
+          fi
+
+      - name: Setup GNU Arm Embedded Toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '15.3.Rel1'
+
+      - name: Checkout pico-sdk 2.3.1
+        uses: actions/checkout@v6.0.1
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.1
+          path: pico-sdk
+
+      - name: Init pico-sdk Submodules
+        working-directory: ${{ github.workspace }}/pico-sdk
+        run: git submodule update --init
+
+      - name: Download fsdata.c Artifact
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: fsData
+          path: ${{ github.workspace }}/lib/httpd/
+
+      - name: Configure CMake (${{ matrix.GP2040_BOARDCONFIG }})
+        shell: bash
+        run: |
+          PICO_SDK_PATH=${{ github.workspace }}/pico-sdk \
+          GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} \
+          SKIP_WEBBUILD=TRUE \
+          cmake -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build Firmware (${{ matrix.GP2040_BOARDCONFIG }})
+        shell: bash
+        run: |
+          GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} \
+          cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel "$(nproc)"
+
+      - name: Upload .uf2 Artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: GP2040-CE_16Macros_${{ matrix.GP2040_BOARDCONFIG }}
+          path: ${{ github.workspace }}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
+          if-no-files-found: error
+
+      - name: Upload .elf Artifact
+        if: ${{ matrix.GP2040_BOARDCONFIG == 'Pico' || matrix.GP2040_BOARDCONFIG == 'Pico2' }}
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: GP2040-CE_16Macros_${{ matrix.GP2040_BOARDCONFIG }}_elf
+          path: ${{ github.workspace }}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
+          if-no-files-found: error
