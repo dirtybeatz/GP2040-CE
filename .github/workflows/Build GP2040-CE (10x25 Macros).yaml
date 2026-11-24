@@ -10,7 +10,7 @@ on:
       board_config:
         description: "Ordnername aus configs/ (z. B. FlatboxRev5, FlatboxUltra, Pico)"
         required: true
-        default: "FlatboxUltra"
+        default: "FlatboxRev5"
       min_eeprom:
         description: "Minimale EEPROM-Größe in Bytes (Vielfaches von 4096)"
         required: true
@@ -21,7 +21,7 @@ on:
         default: ""
 
 env:
-  DEFAULT_BOARD_CONFIG: FlatboxUltra
+  DEFAULT_BOARD_CONFIG: FlatboxRev5
   MACRO_SLOTS: "10"
   MACRO_INPUTS: "25"
 
