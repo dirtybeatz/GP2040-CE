@@ -1,0 +1,406 @@
+name: Build GP2040-CE (10x25 Macros)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      board_config:
+        description: "Ordnername aus configs/ (z. B. FlatboxRev5, FlatboxUltra, Pico)"
+        required: true
+        default: "FlatboxRev5"
+      min_eeprom:
+        description: "Minimale EEPROM-Größe in Bytes (Vielfaches von 4096)"
+        required: true
+        default: "32768"
+      label_size:
+        description: "Optional: macroLabel kürzen (z. B. 32 spart 320 Bytes, leer = Standard)"
+        required: false
+        default: ""
+
+env:
+  DEFAULT_BOARD_CONFIG: FlatboxRev5
+  MACRO_SLOTS: "10"
+  MACRO_INPUTS: "25"
+
+jobs:
+  build:
+    name: Build Firmware (10x25)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository & Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Build Dependencies & ARM Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            protobuf-compiler
+          python3 -m pip install --upgrade pip "protobuf>=4.21.6,<5" "grpcio-tools>=1.47.0,<1.63"
+
+      - name: Patch Macros (10 Slots x 25 Inputs)
+        run: |
+          cat << 'EOF' > /tmp/patch_macros_10x25.py
+          #!/usr/bin/env python3
+          import argparse
+          import re
+          import sys
+          from pathlib import Path
+
+
+          def parse_int_expr(expr: str) -> int | None:
+              cleaned = expr.strip().strip("()")
+              if not cleaned:
+                  return None
+              parts = [p.strip() for p in cleaned.split("*")]
+              result = 1
+              try:
+                  for part in parts:
+                      result *= int(part, 0)
+                  return result
+              except ValueError:
+                  return None
+
+
+          def apply_regex(text: str, pattern: str, replacement: str, flags: int = 0) -> tuple[str, int]:
+              return re.subn(pattern, replacement, text, flags=flags)
+
+
+          def write_if_changed(path: Path, original: str, updated: str, changes: list[str]) -> bool:
+              if original == updated:
+                  return False
+              print(f"GEÄNDERT: {path}")
+              for c in changes:
+                  print(f"    -> {c}")
+              path.write_text(updated, encoding="utf-8")
+              return True
+
+
+          def patch_config_proto(repo: Path, slots: int, inputs: int, label_size: int | None) -> bool:
+              proto_path = repo / "proto" / "config.proto"
+              if not proto_path.is_file():
+                  print(f"[FEHLER] Nicht gefunden: {proto_path}", file=sys.stderr)
+                  return False
+
+              original = proto_path.read_text(encoding="utf-8")
+              updated = original
+              changes: list[str] = []
+
+              updated, n1 = apply_regex(
+                  updated,
+                  r"(repeated\s+Macro\s+macroList\s*=\s*\d+\s*\[[^\]]*\(nanopb\)\.max_count\s*=\s*)(\d+)",
+                  rf"\g<1>{slots}",
+              )
+              if n1:
+                  changes.append(f"macroList max_count -> {slots}")
+              else:
+                  print(f"[WARNUNG] macroList max_count nicht in {proto_path} gefunden.")
+
+              updated, n2 = apply_regex(
+                  updated,
+                  r"(repeated\s+MacroInput\s+macroInputs\s*=\s*\d+\s*\[[^\]]*\(nanopb\)\.max_count\s*=\s*)(\d+)",
+                  rf"\g<1>{inputs}",
+              )
+              if n2:
+                  changes.append(f"macroInputs max_count -> {inputs}")
+              else:
+                  print(f"[WARNUNG] macroInputs max_count nicht in {proto_path} gefunden.")
+
+              if label_size is not None:
+                  updated, n3 = apply_regex(
+                      updated,
+                      r"(string\s+macroLabel\s*=\s*\d+\s*\[[^\]]*\(nanopb\)\.max_size\s*=\s*)(\d+)",
+                      rf"\g<1>{label_size}",
+                  )
+                  if n3:
+                      changes.append(f"macroLabel max_size -> {label_size}")
+                  else:
+                      print(f"[WARNUNG] macroLabel max_size nicht in {proto_path} gefunden.")
+
+              write_if_changed(proto_path, original, updated, changes)
+              return True
+
+
+          def patch_input_macro_header(repo: Path, slots: int, inputs: int) -> bool:
+              header_path = repo / "headers" / "addons" / "input_macro.h"
+              if not header_path.is_file():
+                  print(f"[FEHLER] Nicht gefunden: {header_path}", file=sys.stderr)
+                  return False
+
+              original = header_path.read_text(encoding="utf-8")
+              updated = original
+              changes: list[str] = []
+
+              updated, n1 = apply_regex(
+                  updated,
+                  r"(#define\s+MAX_MACRO_LIMIT\s+)(\d+)",
+                  rf"\g<1>{slots}",
+              )
+              if n1:
+                  changes.append(f"MAX_MACRO_LIMIT -> {slots}")
+              else:
+                  print(f"[WARNUNG] MAX_MACRO_LIMIT nicht in {header_path} gefunden.")
+
+              updated, n2 = apply_regex(
+                  updated,
+                  r"(#define\s+MAX_MACRO_INPUT_LIMIT\s+)(\d+)",
+                  rf"\g<1>{inputs}",
+              )
+              if n2:
+                  changes.append(f"MAX_MACRO_INPUT_LIMIT -> {inputs}")
+              else:
+                  print(f"[WARNUNG] MAX_MACRO_INPUT_LIMIT nicht in {header_path} gefunden.")
+
+              write_if_changed(header_path, original, updated, changes)
+              return True
+
+
+          def patch_flashprom(repo: Path, min_eeprom: int) -> None:
+              flash_path = repo / "lib" / "FlashPROM" / "src" / "FlashPROM.h"
+              if not flash_path.is_file():
+                  print(f"[WARNUNG] Nicht gefunden: {flash_path}")
+                  return
+
+              original = flash_path.read_text(encoding="utf-8")
+              match = re.search(r"(#define\s+EEPROM_SIZE_BYTES\s+)([^\r\n/]+)", original)
+              if not match:
+                  print(f"[WARNUNG] EEPROM_SIZE_BYTES nicht in {flash_path} gefunden.")
+                  return
+
+              current_val = parse_int_expr(match.group(2))
+              if min_eeprom % 4096 != 0:
+                  print(f"[FEHLER] EEPROM-Größe ({min_eeprom}) muss ein Vielfaches von 4096 sein.", file=sys.stderr)
+                  sys.exit(1)
+
+              if current_val is None:
+                  print(f"[WARNUNG] Konnte EEPROM_SIZE_BYTES ('{match.group(2).strip()}') nicht auswerten.")
+                  return
+
+              if current_val < min_eeprom:
+                  updated = original[: match.start(2)] + str(min_eeprom) + original[match.end(2) :]
+                  write_if_changed(flash_path, original, updated, [f"EEPROM_SIZE_BYTES: {current_val} -> {min_eeprom}"])
+              else:
+                  print(f"OK: {flash_path} (EEPROM_SIZE_BYTES = {current_val} Bytes >= {min_eeprom})")
+
+
+          def patch_cpp_sources(repo: Path) -> None:
+              candidates = [
+                  repo / "src" / "config_utils.cpp",
+                  repo / "src" / "addons" / "input_macro.cpp",
+                  repo / "src" / "configs" / "webconfig.cpp",
+                  repo / "src" / "webconfig.cpp",
+              ]
+              for path in candidates:
+                  if not path.is_file():
+                      continue
+                  original = path.read_text(encoding="utf-8")
+                  updated = original
+                  changes: list[str] = []
+
+                  updated, n1 = apply_regex(updated, r"(macroList_count\s*=\s*)6(\s*;)", r"\g<1>MAX_MACRO_LIMIT\g<2>")
+                  if n1:
+                      changes.append("macroList_count = 6 -> MAX_MACRO_LIMIT")
+
+                  updated, n2 = apply_regex(updated, r"(macroInputs_count\s*=\s*)30(\s*;)", r"\g<1>MAX_MACRO_INPUT_LIMIT\g<2>")
+                  if n2:
+                      changes.append("macroInputs_count = 30 -> MAX_MACRO_INPUT_LIMIT")
+
+                  write_if_changed(path, original, updated, changes)
+
+
+          def patch_web_ui(repo: Path, slots: int, inputs: int) -> None:
+              www_src = repo / "www" / "src"
+              if not www_src.is_dir():
+                  print(f"[WARNUNG] Web-UI-Verzeichnis nicht gefunden: {www_src}")
+                  return
+
+              extensions = {".ts", ".tsx", ".js", ".jsx"}
+              patched_files = 0
+              inputs_patched = False
+              macro_files_checked: list[Path] = []
+
+              for path in sorted(www_src.rglob("*")):
+                  if path.suffix not in extensions or not path.is_file():
+                      continue
+
+                  original = path.read_text(encoding="utf-8", errors="replace")
+                  is_macro_file = "macro" in path.name.lower()
+                  has_macro_refs = any(
+                      k in original
+                      for k in ("MAX_MACRO", "MACRO_LIMIT", "MACRO_INPUT", "MAX_INPUT", "macroList", "macroInputs")
+                  )
+                  if not (is_macro_file or has_macro_refs):
+                      continue
+
+                  macro_files_checked.append(path)
+                  updated = original
+                  changes: list[str] = []
+
+                  slot_rules = [
+                      (r"\b((?:MAX_)?MACRO_LIMIT\s*=\s*)\d+", rf"\g<1>{slots}", f"MACRO_LIMIT -> {slots}"),
+                      (r"((?:macroList|macros)\.length\s*(?:<|<=|>=|>|===|==)\s*)6\b", rf"\g<1>{slots}", f"macroList.length -> {slots}"),
+                      (r"((?:macroList|macros)\.slice\(\s*0\s*,\s*)6(\s*\))", rf"\g<1>{slots}\g<2>", f"macroList.slice -> {slots}"),
+                  ]
+                  input_rules = [
+                      (r"\b((?:MAX_)?(?:MACRO_)?INPUTS?_(?:LIMIT|MAX)\s*=\s*)\d+", rf"\g<1>{inputs}", f"INPUT_LIMIT/MAX -> {inputs}"),
+                      (r"\b(MAX_(?:MACRO_)?INPUTS?\s*=\s*)\d+", rf"\g<1>{inputs}", f"MAX_INPUTS -> {inputs}"),
+                      (r"((?:macroInputs|inputs)\.slice\(\s*0\s*,\s*)30(\s*\))", rf"\g<1>{inputs}\g<2>", f"macroInputs.slice -> {inputs}"),
+                  ]
+
+                  if is_macro_file:
+                      slot_rules.extend([
+                          (r"(Array\.from\(\s*\{\s*length\s*:\s*)6(\s*\))", rf"\g<1>{slots}\g<2>", f"Array.from -> {slots}"),
+                          (r"(new\s+Array\(\s*)6(\s*\))", rf"\g<1>{slots}\g<2>", f"new Array -> {slots}"),
+                      ])
+                      input_rules.extend([
+                          (r"(\.length\s*(?:<|<=|>=|>|===|==)\s*)30\b", rf"\g<1>{inputs}", f".length-Check -> {inputs}"),
+                          (r"(\.max\(\s*)30(\s*[,)])", rf"\g<1>{inputs}\g<2>", f"schema .max() -> {inputs}"),
+                      ])
+                  else:
+                      input_rules.append(
+                          (r"((?:macroInputs|inputs)\.length\s*(?:<|<=|>=|>|===|==)\s*)30\b", rf"\g<1>{inputs}", f"macroInputs.length -> {inputs}")
+                      )
+
+                  for pattern, repl, desc in slot_rules:
+                      prev = updated
+                      updated, count = apply_regex(updated, pattern, repl)
+                      if count and updated != prev:
+                          changes.append(f"{desc} ({count}x)")
+
+                  for pattern, repl, desc in input_rules:
+                      prev = updated
+                      updated, count = apply_regex(updated, pattern, repl)
+                      if count and updated != prev:
+                          changes.append(f"{desc} ({count}x)")
+                          inputs_patched = True
+
+                  if write_if_changed(path, original, updated, changes):
+                      patched_files += 1
+
+              if patched_files == 0:
+                  print("[HINWEIS] Keine Web-UI-Dateien geändert.")
+
+              if not inputs_patched:
+                  print("[DIAGNOSE] Kein Web-UI-Input-Limit (30) getroffen. Offene '30'-Zeilen in Makro-Dateien:")
+                  for path in macro_files_checked:
+                      for idx, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                          if re.search(r"\b30\b", line):
+                              print(f"    {path.relative_to(repo)}:{idx}: {line.strip()}")
+
+
+          def main() -> None:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--slots", type=int, default=10)
+              parser.add_argument("--inputs", type=int, default=25)
+              parser.add_argument("--min-eeprom", type=int, default=32768)
+              parser.add_argument("--label-size", type=int, default=None)
+              args = parser.parse_args()
+
+              repo = Path(".").resolve()
+              print(f"Ziel-Konfiguration: {args.slots} Slots x {args.inputs} Input-Zeilen")
+              ok_proto = patch_config_proto(repo, args.slots, args.inputs, args.label_size)
+              ok_header = patch_input_macro_header(repo, args.slots, args.inputs)
+              patch_flashprom(repo, args.min_eeprom)
+              patch_cpp_sources(repo)
+              patch_web_ui(repo, args.slots, args.inputs)
+              if not (ok_proto and ok_header):
+                  sys.exit(1)
+
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+          EEPROM_VAL="${{ github.event.inputs.min_eeprom || '32768' }}"
+          LABEL_ARG=""
+          if [ -n "${{ github.event.inputs.label_size }}" ]; then
+            LABEL_ARG="--label-size ${{ github.event.inputs.label_size }}"
+          fi
+
+          python3 /tmp/patch_macros_10x25.py \
+            --slots "${MACRO_SLOTS}" \
+            --inputs "${MACRO_INPUTS}" \
+            --min-eeprom "${EEPROM_VAL}" \
+            ${LABEL_ARG}
+
+          echo "=== Geänderte Dateien ==="
+          git status --short
+          git diff --stat
+
+      - name: Build Web Configurator (www)
+        working-directory: www
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm run build
+
+      - name: Clone Raspberry Pi Pico SDK (1.5.1)
+        run: |
+          git clone --branch 1.5.1 --depth 1 https://github.com/raspberrypi/pico-sdk.git /tmp/pico-sdk
+          git -C /tmp/pico-sdk submodule update --init
+          echo "PICO_SDK_PATH=/tmp/pico-sdk" >> "$GITHUB_ENV"
+
+      - name: Configure & Build Firmware
+        run: |
+          BOARD="${{ github.event.inputs.board_config || env.DEFAULT_BOARD_CONFIG }}"
+          echo "Baue Konfiguration: configs/${BOARD}"
+
+          if [ ! -d "configs/${BOARD}" ]; then
+            echo "FEHLER: configs/${BOARD} existiert nicht. Verfügbare Ordner:"
+            ls -1 configs/
+            exit 1
+          fi
+
+          # Korrigiert ENV(CI) -> ENV{CI} in CMakeLists.txt, falls noch vorhanden
+          sed -i 's/ENV(CI)/ENV{CI}/g' CMakeLists.txt
+
+          # Gilt auch für alle CMake-Unterprozesse (PioasmBuild, ELF2UF2Build)
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' \
+            /tmp/pico-sdk/tools/pioasm/CMakeLists.txt
+
+          # Nanopb in v0.7.8 benötigt protobuf 4.x (reflection.MakeClass)
+          printf "protobuf>=4.21.6,<5\ngrpcio-tools>=1.47.0,<1.63\n" > lib/nanopb/extra/requirements.txt
+
+          cmake -B build -G Ninja \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPython3_EXECUTABLE="$(which python3)" \
+            -DGP2040_BOARDCONFIG="${BOARD}"
+          cmake --build build --parallel
+
+          echo "=== Gefundene UF2-Dateien ==="
+          find build -maxdepth 3 -name "*.uf2" -ls
+
+      - name: Upload UF2 Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GP2040-CE-${{ github.event.inputs.board_config || env.DEFAULT_BOARD_CONFIG }}-10x25
+          path: |
+            build/*.uf2
+            build/**/*.uf2
+          if-no-files-found: error
