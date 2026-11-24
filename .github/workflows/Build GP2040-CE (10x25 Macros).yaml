@@ -10,7 +10,7 @@ on:
       board_config:
         description: "Ordnername aus configs/ (z. B. FlatboxRev5, FlatboxUltra, Pico)"
         required: true
-        default: "FlatboxRev5"
+        default: "FlatboxUltra"
       min_eeprom:
         description: "Minimale EEPROM-Größe in Bytes (Vielfaches von 4096)"
         required: true
@@ -21,7 +21,7 @@ on:
         default: ""
 
 env:
-  DEFAULT_BOARD_CONFIG: FlatboxRev5
+  DEFAULT_BOARD_CONFIG: FlatboxUltra
   MACRO_SLOTS: "10"
   MACRO_INPUTS: "25"
 
@@ -53,6 +53,8 @@ jobs:
             build-essential \
             cmake \
             ninja-build \
+            pkg-config \
+            libusb-1.0-0-dev \
             gcc-arm-none-eabi \
             libnewlib-arm-none-eabi \
             libstdc++-arm-none-eabi-newlib \
@@ -358,9 +360,9 @@ jobs:
           fi
           npm run build
 
-      - name: Clone Raspberry Pi Pico SDK (1.5.1)
+      - name: Clone Raspberry Pi Pico SDK (latest)
         run: |
-          git clone --branch 1.5.1 --depth 1 https://github.com/raspberrypi/pico-sdk.git /tmp/pico-sdk
+          git clone --depth 1 https://github.com/raspberrypi/pico-sdk.git /tmp/pico-sdk
           git -C /tmp/pico-sdk submodule update --init
           echo "PICO_SDK_PATH=/tmp/pico-sdk" >> "$GITHUB_ENV"
 
@@ -378,13 +380,15 @@ jobs:
           # Korrigiert ENV(CI) -> ENV{CI} in CMakeLists.txt, falls noch vorhanden
           sed -i 's/ENV(CI)/ENV{CI}/g' CMakeLists.txt
 
-          # Gilt auch für alle CMake-Unterprozesse (PioasmBuild, ELF2UF2Build)
+          # Nur auf älteren SDK-/Nanopb-Ständen anwenden
           export CMAKE_POLICY_VERSION_MINIMUM=3.5
-          sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' \
-            /tmp/pico-sdk/tools/pioasm/CMakeLists.txt
-
-          # Nanopb in v0.7.8 benötigt protobuf 4.x (reflection.MakeClass)
-          printf "protobuf>=4.21.6,<5\ngrpcio-tools>=1.47.0,<1.63\n" > lib/nanopb/extra/requirements.txt
+          if [ -f /tmp/pico-sdk/tools/pioasm/CMakeLists.txt ]; then
+            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' \
+              /tmp/pico-sdk/tools/pioasm/CMakeLists.txt
+          fi
+          if [ -f lib/nanopb/generator/nanopb_generator.py ] && grep -q "MakeClass" lib/nanopb/generator/nanopb_generator.py && [ -f lib/nanopb/extra/requirements.txt ]; then
+            printf "protobuf>=4.21.6,<5\ngrpcio-tools>=1.47.0,<1.63\n" > lib/nanopb/extra/requirements.txt
+          fi
 
           cmake -B build -G Ninja \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
