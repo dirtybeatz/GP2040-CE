@@ -42,7 +42,7 @@ jobs:
       MACRO_INPUTS: ${{ inputs.macro_inputs || '25' }}
       PICO_SDK_VERSION: ${{ inputs.pico_sdk_version || '2.3.1' }}
       ARM_TOOLCHAIN_VERSION: ${{ inputs.arm_toolchain_version || '15.3.rel1' }}
-      
+
     steps:
       - name: 1. Repository inklusive Submodule auschecken
         uses: actions/checkout@v4
@@ -78,10 +78,11 @@ jobs:
           TOOLCHAIN_VER_LOWER="${ARM_TOOLCHAIN_VERSION,,}"
           TOOLCHAIN_ARCHIVE="arm-gnu-toolchain-${TOOLCHAIN_VER_LOWER}-x86_64-arm-none-eabi.tar.xz"
           curl -fSL \
-          "https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/${TOOLCHAIN_VER_LOWER}/${TOOLCHAIN_ARCHIVE}" \
-          -o "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}"
+            "https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/${TOOLCHAIN_VER_LOWER}/${TOOLCHAIN_ARCHIVE}" \
+            -o "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}"
           tar -xf "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}" -C "${TOOLCHAIN_DIR}" --strip-components=1
           echo "${TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
+
           # Pico SDK klonen
           PICO_SDK_DIR="${{ runner.temp }}/pico-sdk"
           git clone --depth 1 --branch "${PICO_SDK_VERSION}" https://github.com/raspberrypi/pico-sdk.git "${PICO_SDK_DIR}"
