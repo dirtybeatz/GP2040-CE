@@ -14,7 +14,7 @@ on:
       min_eeprom:
         description: "Minimale EEPROM-Größe in Bytes (Vielfaches von 4096)"
         required: true
-        default: "32768"
+        default: "36864"
       label_size:
         description: "Optional: macroLabel kürzen (z. B. 32 spart 320 Bytes, leer = Standard)"
         required: false
@@ -334,7 +334,7 @@ jobs:
               main()
           EOF
 
-          EEPROM_VAL="${{ github.event.inputs.min_eeprom || '32768' }}"
+          EEPROM_VAL="${{ github.event.inputs.min_eeprom || '36864' }}"
           LABEL_ARG=""
           if [ -n "${{ github.event.inputs.label_size }}" ]; then
             LABEL_ARG="--label-size ${{ github.event.inputs.label_size }}"
