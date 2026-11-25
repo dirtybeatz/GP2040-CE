@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: ["main"]
   # pull_request_target:
-  #   branches: [ "main" ]
+  #   branches: ["main"]
   workflow_dispatch:
     inputs:
       board_config:
@@ -22,7 +22,6 @@ on:
           - Pico
           - PicoW
           - Pico2
-          - Pico2W
           - BentoBox
           - FlatboxRev4
           - FlatboxRev5
@@ -87,7 +86,7 @@ jobs:
       - id: set-matrix
         run: |
           CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
-          echo "matrix=$CONFIG_DIRS" >> $GITHUB_OUTPUT
+          echo "matrix=$CONFIG_DIRS" >> "$GITHUB_OUTPUT"
 
   build:
     needs: [call-node-workflow, build-config-list]
@@ -125,130 +124,33 @@ jobs:
           path: pico-sdk
 
       - name: Checkout pico-sdk submodules
-        working-directory: ${{github.workspace}}/pico-sdk
+        working-directory: ${{ github.workspace }}/pico-sdk
         run: git submodule update --init
 
       - name: Download a Build Artifact
         uses: actions/download-artifact@v7.0.0
         with:
           name: fsData
-          path: ${{github.workspace}}/lib/httpd/
+          path: ${{ github.workspace }}/lib/httpd/
 
       - name: Get core count
         id: core_count
-        run: cat /proc/cpuinfo | grep processor | wc -l
+        run: echo "output=$(nproc)" >> "$GITHUB_OUTPUT"
       # End Global Setup
-
-      - name: Fix LWIP_RAND und webconfig.cpp is_custom_file
-        shell: bash
-        run: |
-          python3 - << 'EOF'
-          import re
-          import textwrap
-          from pathlib import Path
-
-          ROOT = Path.cwd()
-
-          # 1. LWIP_RAND() und LWIP_HTTPD_CUSTOM_FILES in allen lwipopts.h / cc.h ergänzen
-          rand_snippet = textwrap.dedent("""\
-              #include <stdlib.h>
-              #ifndef LWIP_RAND
-              #define LWIP_RAND() ((unsigned int)rand())
-              #endif
-              #ifndef LWIP_HTTPD_CUSTOM_FILES
-              #define LWIP_HTTPD_CUSTOM_FILES 1
-              #endif
-          """)
-
-          for fname in ("lwipopts.h", "cc.h"):
-              for p in ROOT.rglob(fname):
-                  if any(part in ("build", "pico-sdk", ".git") for part in p.parts):
-                      continue
-                  txt = p.read_text(encoding="utf-8")
-                  txt = re.sub(
-                      r"(#define\s+LWIP_HTTPD_CUSTOM_FILES\s+)0\b",
-                      r"\g<1>1",
-                      txt,
-                  )
-                  if "LWIP_RAND" not in txt:
-                      has_guard = bool(
-                          re.match(
-                              r"^\s*(?:/\*.*?\*/\s*|//[^\n]*\n\s*)*#ifndef\s+\w+",
-                              txt,
-                              re.DOTALL,
-                          )
-                      )
-                      idx = txt.rfind("#endif") if has_guard else -1
-                      if idx != -1:
-                          txt = txt[:idx] + "\n" + rand_snippet + "\n" + txt[idx:]
-                      else:
-                          txt = txt + "\n" + rand_snippet + "\n"
-                  p.write_text(txt, encoding="utf-8")
-                  print(f"[OK] lwIP-Header gepatcht: {p.relative_to(ROOT)}")
-
-          # 2. src/webconfig.cpp: SFINAE-Kompatibilitäts-Helper für is_custom_file
-          web_p = ROOT / "src/webconfig.cpp"
-          if web_p.exists():
-              txt = web_p.read_text(encoding="utf-8")
-              if "gp2040_set_custom_file_impl" not in txt:
-                  helper = textwrap.dedent("""\
-                      namespace {
-                      template <typename T>
-                      auto gp2040_set_custom_file_impl(T* f, int val, int) -> decltype((void)(f->is_custom_file = val)) {
-                          f->is_custom_file = val;
-                      }
-                      template <typename T>
-                      void gp2040_set_custom_file_impl(T*, int, long) {}
-
-                      template <typename T>
-                      auto gp2040_is_custom_file_impl(T* f, int) -> decltype(f->is_custom_file != 0) {
-                          return f->is_custom_file != 0;
-                      }
-                      template <typename T>
-                      bool gp2040_is_custom_file_impl(T* f, long) {
-                          return f->pextension != nullptr;
-                      }
-                      } // namespace
-                  """)
-                  if '#include "webconfig.h"' in txt:
-                      txt = txt.replace(
-                          '#include "webconfig.h"',
-                          '#include "webconfig.h"\n' + helper,
-                          1,
-                      )
-                  else:
-                      txt = helper + "\n" + txt
-
-              txt = re.sub(
-                  r"(\b\w+)->is_custom_file\s*=\s*([^;]+);",
-                  r"gp2040_set_custom_file_impl(\1, \2, 0);",
-                  txt,
-              )
-              txt = re.sub(
-                  r"(\b\w+)->is_custom_file\b",
-                  r"gp2040_is_custom_file_impl(\1, 0)",
-                  txt,
-              )
-              web_p.write_text(txt, encoding="utf-8")
-              print("[OK] src/webconfig.cpp gepatcht")
-          EOF
 
       - name: Pico Build Configure CMake
         shell: bash
-        env:
-          WIFI_SSID: ${{ secrets.WIFI_SSID }}
-          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD }}
-        run: PICO_SDK_PATH=${{github.workspace}}/pico-sdk GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} SKIP_WEBBUILD=TRUE cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DWIFI_SSID="${WIFI_SSID}" -DWIFI_PASSWORD="${WIFI_PASSWORD}"
+        run: PICO_SDK_PATH=${{ github.workspace }}/pico-sdk GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} SKIP_WEBBUILD=TRUE cmake -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 
       - name: Pico Build
         shell: bash
-        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel ${{steps.core_count.outputs.output}}
+        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel ${{ steps.core_count.outputs.output }}
 
       - name: Upload Pico Artifact
         uses: actions/upload-artifact@v6.0.0
         with:
           name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
+          path: ${{ github.workspace }}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
           if-no-files-found: error
 
       - name: Upload .elf Artifact
@@ -256,5 +158,5 @@ jobs:
         uses: actions/upload-artifact@v6.0.0
         with:
           name: elf
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
+          path: ${{ github.workspace }}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
           if-no-files-found: error
