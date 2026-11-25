@@ -16,9 +16,9 @@ on:
         required: true
         default: '25'
       pico_sdk_version:
-        description: 'Pico SDK Version (Standard GP2040-CE v0.7.12 = 2.1.1)'
+        description: 'Pico SDK Version (Standard GP2040-CE v0.7.12 = 2.3.1)'
         required: true
-        default: '2.1.1'
+        default: '2.3.1'
       arm_toolchain_version:
         description: 'Arm GNU Toolchain Version'
         required: true
@@ -40,7 +40,7 @@ jobs:
       BOARD_CONFIG: ${{ inputs.board_config || 'Haute42COSMOX' }}
       MACRO_SLOTS: ${{ inputs.macro_slots || '10' }}
       MACRO_INPUTS: ${{ inputs.macro_inputs || '25' }}
-      PICO_SDK_VERSION: ${{ inputs.pico_sdk_version || '2.1.1' }}
+      PICO_SDK_VERSION: ${{ inputs.pico_sdk_version || '2.3.1' }}
       ARM_TOOLCHAIN_VERSION: ${{ inputs.arm_toolchain_version || '14.2.rel1' }}
 
     steps:
