@@ -1,0 +1,70 @@
+name: Build Flatbox Ultra (8 Macros + Web UI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      board_config:
+        description: 'GP2040-CE Board Config'
+        required: true
+        default: 'FlatboxRev5RGB'
+        type: choice
+        options:
+          - FlatboxRev5RGB
+          - FlatboxRev4
+          - FlatboxRev5USBPassthrough
+          - FlatboxUltra
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout GP2040-CE
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout Pico SDK 2.1.1
+        run: |
+          git clone --depth 1 --branch 2.1.1 --recurse-submodules \
+            https://github.com/raspberrypi/pico-sdk.git "${{ github.workspace }}/pico-sdk"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ARM Toolchain & Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build build-essential pkg-config libusb-1.0-0-dev \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            python3 python3-pip python3-protobuf
+          pip3 install --user protobuf
+
+      - name: Apply 8-Macro Patch (Firmware + Web UI)
+        run: node scripts/patch_8_macros.mjs
+
+      - name: Install Web UI Dependencies
+        working-directory: www
+        run: npm ci
+
+      - name: Configure & Build Firmware + Embedded Web UI
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+          GP2040_BOARDCONFIG: ${{ inputs.board_config || 'FlatboxRev5RGB' }}
+        run: |
+          cmake -B build -G Ninja \
+            -DPICO_SDK_PATH="${PICO_SDK_PATH}" \
+            -DGP2040_BOARDCONFIG="${GP2040_BOARDCONFIG}"
+          cmake --build build --parallel $(nproc)
+
+      - name: Upload UF2 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GP2040-CE-8Macros-${{ inputs.board_config || 'FlatboxRev5RGB' }}
+          path: build/*.uf2
+          if-no-files-found: error
