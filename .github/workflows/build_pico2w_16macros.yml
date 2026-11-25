@@ -1,0 +1,200 @@
+name: Build GP2040-CE Pico 2 W (16 Macros - All-in-One)
+
+on:
+  workflow_dispatch:
+    inputs:
+      board_config:
+        description: "Board-Konfiguration unter configs/"
+        required: false
+        default: "Pico2W"
+      base_board_fallback:
+        description: "Basis-Pinout, falls configs/<board_config> noch nicht existiert"
+        required: false
+        default: "Pico"
+      build_type:
+        description: "CMake Build-Typ"
+        required: false
+        default: "Release"
+
+env:
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
+  BOARD_CONFIG: ${{ github.event.inputs.board_config || 'Pico2W' }}
+  BASE_BOARD_FALLBACK: ${{ github.event.inputs.base_board_fallback || 'Pico' }}
+  PICO_SDK_VERSION: "2.3.1"
+  ARM_TOOLCHAIN_VERSION: "15.3.rel1"
+  CMAKE_VERSION: "3.31.6"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ninja-build \
+            python3 \
+            python3-pip \
+            python3-venv \
+            git \
+            curl \
+            xz-utils \
+            pkg-config \
+            libssl-dev
+
+      - name: Install CMake ${{ env.CMAKE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            -o /tmp/cmake.tar.gz
+          sudo tar -xzf /tmp/cmake.tar.gz -C /usr/local --strip-components=1
+          cmake --version
+
+      - name: Install ARM GNU Toolchain (${{ env.ARM_TOOLCHAIN_VERSION }})
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/arm-toolchain"
+          curl -fsSL "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VERSION}/binrel/arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-x86_64-arm-none-eabi.tar.xz" \
+            -o /tmp/arm-toolchain.tar.xz
+          tar -xJf /tmp/arm-toolchain.tar.xz -C "$HOME/arm-toolchain" --strip-components=1
+          echo "$HOME/arm-toolchain/bin" >> "$GITHUB_PATH"
+          "$HOME/arm-toolchain/bin/arm-none-eabi-gcc" --version
+
+      - name: Setup Node.js for Web-UI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Clone Pico SDK ${{ env.PICO_SDK_VERSION }}
+        run: |
+          set -euo pipefail
+          rm -rf pico-sdk
+          git clone --depth 1 --branch "${PICO_SDK_VERSION}" --recurse-submodules \
+            https://github.com/raspberrypi/pico-sdk.git pico-sdk
+          echo "PICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk" >> "$GITHUB_ENV"
+
+      - name: Apply the repository's 16-macro Option A patch
+        run: |
+          set -euo pipefail
+          if grep -q '^#define MAX_MACRO_LIMIT 16$' headers/addons/input_macro.h; then
+            echo "16-macro patch is already applied, skipping."
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          import re
+
+          workflow = Path(".github/workflows/gp2040ce_16_macros_optionA_v2.yml").read_text(encoding="utf-8")
+          begin = "base64 -d << 'EOF_PATCH_B64'"
+          end = "EOF_PATCH_B64"
+          if begin not in workflow:
+              raise SystemExit("Could not find the embedded Option A patch in the source workflow")
+
+          after_begin = workflow.split(begin, 1)[1]
+          # Rest der Startzeile (z. B. Umleitung "> 16_macros_optionA.patch") überspringen
+          body = after_begin.split("\n", 1)[1]
+
+          lines = []
+          found_end = False
+          for idx, raw_line in enumerate(body.splitlines(), start=1):
+              s = raw_line.strip()
+              if s == end:
+                  found_end = True
+                  break
+              if not s:
+                  continue
+              if not re.fullmatch(r"[A-Za-z0-9+/=]+", s):
+                  raise SystemExit(f"Ungültige Base64-Zeile #{idx}: {s!r}")
+              lines.append(s)
+
+          if not found_end:
+              raise SystemExit(f"End-Marker {end!r} wurde nicht gefunden")
+
+          patch = base64.b64decode("".join(lines), validate=True)
+          Path("16_macros_optionA.patch").write_bytes(patch)
+          PY
+
+          git apply --check 16_macros_optionA.patch
+          git apply --verbose 16_macros_optionA.patch
+          grep -q '^#define MAX_MACRO_LIMIT 16$' headers/addons/input_macro.h
+
+      - name: Ensure Pico2W board config and RP2350 env.cmake exist
+        run: |
+          set -euo pipefail
+          BOARD_DIR="configs/${BOARD_CONFIG}"
+          if [ ! -f "${BOARD_DIR}/BoardConfig.h" ]; then
+            echo "Creating ${BOARD_DIR} from fallback configs/${BASE_BOARD_FALLBACK}..."
+            mkdir -p "${BOARD_DIR}"
+            if [ -f "configs/${BASE_BOARD_FALLBACK}/BoardConfig.h" ]; then
+              cp -r "configs/${BASE_BOARD_FALLBACK}/." "${BOARD_DIR}/"
+            elif [ -f "configs/PicoW/BoardConfig.h" ]; then
+              cp -r "configs/PicoW/." "${BOARD_DIR}/"
+            else
+              cp -r "configs/Pico/." "${BOARD_DIR}/"
+            fi
+          fi
+
+          cat << 'EOF' > "${BOARD_DIR}/env.cmake"
+          set(PICO_BOARD pico2_w CACHE STRING "" FORCE)
+          set(PICO_PLATFORM rp2350-arm-s CACHE STRING "" FORCE)
+          EOF
+
+          ls -la "${BOARD_DIR}"
+          test -f "${BOARD_DIR}/BoardConfig.h"
+
+      - name: Build Web-UI (with 16-macro updates)
+        if: hashFiles('www/package.json') != ''
+        working-directory: www
+        run: |
+          set -euo pipefail
+          npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+          npm run build
+
+      - name: Configure CMake (Pico 2 W / RP2350)
+        run: |
+          set -euo pipefail
+          rm -rf build
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DGP2040_BOARDCONFIG="$BOARD_CONFIG" \
+            -DPICO_BOARD=pico2_w \
+            -DPICO_PLATFORM=rp2350-arm-s \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH"
+
+          echo "=== Verifying CMake RP2350 & BoardConfig settings ==="
+          grep -E '^(PICO_BOARD|PICO_PLATFORM|GP2040_BOARDCONFIG):' build/CMakeCache.txt
+          grep -q '^PICO_PLATFORM:STRING=rp2350-arm-s$' build/CMakeCache.txt
+          grep -q '^PICO_BOARD:STRING=pico2_w$' build/CMakeCache.txt
+
+      - name: Build firmware
+        run: |
+          set -euo pipefail
+          cmake --build build --config "$BUILD_TYPE" --parallel "$(nproc)"
+
+      - name: Verify generated UF2 artifact
+        run: |
+          set -euo pipefail
+          ls -lh build/*.uf2
+          if [ -x build/_deps/picotool-build/picotool ]; then
+            build/_deps/picotool-build/picotool info -a build/*.uf2 || true
+          fi
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GP2040-CE-${{ env.BOARD_CONFIG }}-16macros-${{ env.BUILD_TYPE }}
+          path: |
+            build/*.uf2
+            build/*.elf
+            build/*.bin
+          if-no-files-found: error
