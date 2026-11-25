@@ -16,13 +16,13 @@ on:
         required: true
         default: '25'
       pico_sdk_version:
-        description: 'Pico SDK Version (Standard GP2040-CE v0.7.12 = 2.3.1)'
+        description: 'Pico SDK Version (GP2040-CE aktuell = 2.3.1)'
         required: true
         default: '2.3.1'
       arm_toolchain_version:
-        description: 'Arm GNU Toolchain Version'
+        description: 'Arm GNU Toolchain Version (ab 15.3.rel1 via Arm GitLab)'
         required: true
-        default: '14.2.rel1'
+        default: '15.3.rel1'
   push:
     paths:
       - 'scripts/patch_haute42_s16_10macros.py'
@@ -41,8 +41,8 @@ jobs:
       MACRO_SLOTS: ${{ inputs.macro_slots || '10' }}
       MACRO_INPUTS: ${{ inputs.macro_inputs || '25' }}
       PICO_SDK_VERSION: ${{ inputs.pico_sdk_version || '2.3.1' }}
-      ARM_TOOLCHAIN_VERSION: ${{ inputs.arm_toolchain_version || '14.2.rel1' }}
-
+      ARM_TOOLCHAIN_VERSION: ${{ inputs.arm_toolchain_version || '15.3.rel1' }}
+      
     steps:
       - name: 1. Repository inklusive Submodule auschecken
         uses: actions/checkout@v4
@@ -72,16 +72,16 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install protobuf grpcio-tools
 
-          # Arm GNU Toolchain herunterladen (C++20 / Pico SDK 2.x kompatibel)
+          # Arm GNU Toolchain herunterladen (ab 15.3.rel1 exklusiv über Arm GitLab)
           TOOLCHAIN_DIR="${{ runner.temp }}/arm-gnu-toolchain"
           mkdir -p "${TOOLCHAIN_DIR}"
-          TOOLCHAIN_ARCHIVE="arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-x86_64-arm-none-eabi.tar.xz"
+          TOOLCHAIN_VER_LOWER="${ARM_TOOLCHAIN_VERSION,,}"
+          TOOLCHAIN_ARCHIVE="arm-gnu-toolchain-${TOOLCHAIN_VER_LOWER}-x86_64-arm-none-eabi.tar.xz"
           curl -fSL \
-            "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VERSION}/binrel/${TOOLCHAIN_ARCHIVE}" \
-            -o "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}"
+          "https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/${TOOLCHAIN_VER_LOWER}/${TOOLCHAIN_ARCHIVE}" \
+          -o "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}"
           tar -xf "${{ runner.temp }}/${TOOLCHAIN_ARCHIVE}" -C "${TOOLCHAIN_DIR}" --strip-components=1
           echo "${TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
-
           # Pico SDK klonen
           PICO_SDK_DIR="${{ runner.temp }}/pico-sdk"
           git clone --depth 1 --branch "${PICO_SDK_VERSION}" https://github.com/raspberrypi/pico-sdk.git "${PICO_SDK_DIR}"
