@@ -1,4 +1,4 @@
-name: Flatbox Ultra S - 10 Macros + Pin Mapping (All-in-One v2)
+name: Flatbox Ultra S - 10 Macros + Pin Mapping (All-in-One v3)
 
 on:
   workflow_dispatch:
@@ -418,7 +418,7 @@ jobs:
       - name: Firmware + eingebettete Web-UI kompilieren
         env:
           PICO_SDK_FETCH_FROM_GIT: "ON"
-          PICO_SDK_FETCH_FROM_GIT_TAG: "2.1.1"
+          PICO_SDK_FETCH_FROM_GIT_TAG: "2.3.1"
         run: |
           cmake -B build -G Ninja \
             -DGP2040_BOARDCONFIG="${{ inputs.board }}" \
