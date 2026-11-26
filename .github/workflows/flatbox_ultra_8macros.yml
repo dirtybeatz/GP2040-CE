@@ -45,19 +45,19 @@ jobs:
 
       - name: Verify Board Config
         env:
-          BOARD_CONFIG: ${{ inputs.board_config }}
+          BOARD_CONFIG: \${{ inputs.board_config }}
         run: |
-          if [ ! -d "configs/$BOARD_CONFIG" ]; then
-            echo "❌ Board-Config 'configs/$BOARD_CONFIG' nicht gefunden!"
+          if [ ! -d "configs/\$BOARD_CONFIG" ]; then
+            echo "❌ Board-Config 'configs/\$BOARD_CONFIG' nicht gefunden!"
             echo "Verfügbare Boards in configs/:"
             ls -1 configs/
             exit 1
           fi
-          echo "✅ Board-Config gefunden: configs/$BOARD_CONFIG"
+          echo "✅ Board-Config gefunden: configs/\$BOARD_CONFIG"
 
       - name: Apply 8-Macro Patch (Firmware + Web UI)
         env:
-          MAX_MACRO_INPUTS: ${{ inputs.max_macro_inputs }}
+          MAX_MACRO_INPUTS: \${{ inputs.max_macro_inputs }}
         run: |
           cat << 'EOF' > patch_8_macros.mjs
           import fs from 'fs';
@@ -200,7 +200,7 @@ jobs:
               console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
 
               const updatedBlock = enumBlock.replace(
-                /\}\s*$/,
+                /\}\s*\$/,
                 `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
               );
 
@@ -209,7 +209,7 @@ jobs:
             true
           );
 
-          // 4. src/addons/input_macro.cpp erweitern
+          // 4. src/addons/input_macro.cpp sicher erweitern (Fallthrough + eigene Case-Blöcke ohne default-Duplizierung)
           patchFile(
             'src/addons/input_macro.cpp',
             (content) => {
@@ -220,232 +220,33 @@ jobs:
                 (_, p1) => `${p1}[${TARGET_MACROS}]`
               );
 
-              const caseBlockRegex =
-                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
-
-              if (caseBlockRegex.test(updated)) {
-                updated = updated.replace(caseBlockRegex, (block) => {
-                  const block7 = block
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
-                    .replace(/\[5\]/g, '[6]')
-                    .replace(/\(\s*5\s*\)/g, '(6)')
-                    .replace(/=\s*5\s*;/g, '= 6;')
-                    .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}6`)
-                    .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}6;`);
-                  const block8 = block
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
-                    .replace(/\[5\]/g, '[7]')
-                    .replace(/\(\s*5\s*\)/g, '(7)')
-                    .replace(/=\s*5\s*;/g, '= 7;')
-                    .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}7`)
-                    .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}7;`);
-                  return `${block}\n${block7}\n${block8}`;
-                });
-              } else if (/<=\s*GpioAction::BUTTON_PRESS_MACRO_6\b/.test(updated)) {
-                updated = updated.replace(
-                  /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
-                  (_, p1) => `${p1}${TARGET_MACROS}`
-                );
-              } else {
-                updated = updated.replace(
-                  /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
-                  '$1,\n        GpioAction::BUTTON_PRESS_MACRO_7,\n        GpioAction::BUTTON_PRESS_MACRO_8'
-                );
-              }
-
-              return updated;
-            },
-            true
-          );
-
-          // 5. Weitere C++-Fundstellen (Array-Größen, switch/case, Map-Tabellen, Bereichsprüfungen)
-          for (const file of [...walk('src'), ...walk('headers')]) {
-            if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
-            const text = fs.readFileSync(file, 'utf8');
-            if (!text.includes('BUTTON_PRESS_MACRO_6')) continue;
-
-            console.log(`🔎 Weiterer Fund in C++ (${file}) – wird analysiert...`);
-            const changed = patchFile(file, (content) => {
-              if (content.includes('BUTTON_PRESS_MACRO_7') || content.includes('BUTTON_PRESS_MACRO_8')) {
-                return content;
-              }
-              let out = content;
-
-              // a) Feste GpioAction-Arrays von [6] auf [8] hochsetzen (z.B. migrateMacroPinsToGpio)
-              out = out.replace(
-                /(\bGpioAction\s+\w+\s*)\[\s*6\s*\]/g,
-                (_, p1) => `${p1}[${TARGET_MACROS}]`
+              // 4a) Fallthrough-Listen (z.B. in InputMacro::available(): MACRO_5:\n MACRO_6:\n return true;)
+              updated = updated.replace(
+                /(case\s+GpioAction::BUTTON_PRESS_MACRO_5\s*:[ \t]*\r?\n([ \t]*)case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
+                (_, full, indent) =>
+                  `${full}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:`
               );
 
-              // b) switch-case
-              out = out.replace(
-                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
-                (match) => {
-                  const indent = match.match(/^([ \t]*)/)[1];
-                  return `${match}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:`;
+              // 4b) Eigenständige case-Blöcke für MACRO_6 (stoppt strikt vor case / default / })
+              const dedicatedCaseRegex =
+                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:(?!\s*case\s+GpioAction::BUTTON_PRESS_MACRO_7)(?:(?!\b(?:case|default)\b|\})[\s\S])*)/g;
+
+              updated = updated.replace(dedicatedCaseRegex, (rawBlock) => {
+                const trailingWsMatch = rawBlock.match(/(\s*)\$/);
+                const trailingWs = trailingWsMatch ? trailingWsMatch[1] : '\n';
+                const block = rawBlock.slice(0, rawBlock.length - trailingWs.length);
+
+                const afterColon = block
+                  .replace(/^[ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:/, '')
+                  .trim();
+
+                if (!afterColon) {
+                  const indent = (block.match(/^([ \t]*)/) || ['', ''])[1];
+                  return `${block}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:${trailingWs}`;
                 }
-              );
 
-              // c) Map-/Struct-Einträge wie { GpioAction::BUTTON_PRESS_MACRO_6, "M6" },
-              out = out.replace(
-                /([ \t]*\{\s*GpioAction::BUTTON_PRESS_MACRO_6\s*,\s*([^}\n]*?)\s*\})(,?)/g,
-                (_, entry, secondArg, comma) => {
-                  const entry7 = entry
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
-                    .replace(secondArg, secondArg.replace(/6/g, '7'));
-                  const entry8 = entry
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
-                    .replace(secondArg, secondArg.replace(/6/g, '8'));
-                  return `${entry},\n${entry7},\n${entry8}${comma}`;
-                }
-              );
-
-              // d) Bereichsprüfungen wie action <= GpioAction::BUTTON_PRESS_MACRO_6
-              out = out.replace(
-                /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
-                (_, p1) => `${p1}${TARGET_MACROS}`
-              );
-
-              // e) Listen-/Array-Einträge wie GpioAction::BUTTON_PRESS_MACRO_6
-              if (!out.includes('BUTTON_PRESS_MACRO_7') && !out.includes('BUTTON_PRESS_MACRO_8')) {
-                out = out.replace(
-                  /([ \t]*)(GpioAction::BUTTON_PRESS_MACRO_6)(,?)/g,
-                  (_, indent, ref, comma) =>
-                    `${indent}${ref},\n${indent}GpioAction::BUTTON_PRESS_MACRO_7,\n${indent}GpioAction::BUTTON_PRESS_MACRO_8${comma}`
-                );
-              }
-
-              return out;
-            });
-
-            if (!changed) {
-              const lines = text.split('\n');
-              lines.forEach((line, idx) => {
-                if (line.includes('BUTTON_PRESS_MACRO_6')) {
-                  console.warn(`⚠️ Ungepatchte Zeile in ${file}:${idx + 1}: ${line.trim()}`);
-                }
-              });
-            }
-          }
-
-          // 6. Web-UI patchen (Locales, TS-Enums, optionale Hardcoded-Limits)
-          const webFiles = walk('www/src');
-          let patchedMacroLimitCount = 0;
-          let patchedGpioActionFiles = 0;
-
-          for (const file of webFiles) {
-            if (!/\.(ts|tsx|js|jsx|json)$/.test(file)) continue;
-            const original = fs.readFileSync(file, 'utf8');
-            let updated = original;
-
-            const isMacroFile =
-              /macro/i.test(file) ||
-              /MAX_MACRO_|MACRO_LIMIT|macroList|macroInputs/.test(updated);
-
-            if (isMacroFile) {
-              const before = updated;
-              updated = updated
-                .replace(/((?:MAX_MACRO_LIMIT|MAX_MACROS|MACRO_LIMIT)\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*<\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*>=\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*===?\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`);
-
-              if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
-                updated = updated
-                  .replace(/((?:MAX_MACRO_INPUT_LIMIT|MAX_MACRO_INPUTS|MACRO_INPUT_LIMIT)\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
-                  .replace(/(macroInputs\.length\s*<\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
-                  .replace(/(macroInputs\.length\s*>=\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
-                  .replace(/(macroInputs\.length\s*===?\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`);
-              }
-
-              if (updated !== before) patchedMacroLimitCount++;
-            }
-
-            if (
-              updated.includes('BUTTON_PRESS_MACRO_6') &&
-              !updated.includes('BUTTON_PRESS_MACRO_7')
-            ) {
-              const before = updated;
-
-              // a) TypeScript Enum: BUTTON_PRESS_MACRO_6 = 50,
-              if (/BUTTON_PRESS_MACRO_6\s*=\s*\d+/.test(updated)) {
-                updated = updated.replace(
-                  /([ \t]*)BUTTON_PRESS_MACRO_6(\s*=\s*\d+)(,?)/g,
-                  (_, indent, val, comma) =>
-                    `${indent}BUTTON_PRESS_MACRO_6${val},\n${indent}BUTTON_PRESS_MACRO_7 = ${macro7Id},\n${indent}BUTTON_PRESS_MACRO_8 = ${macro8Id}${comma}`
-                );
-              }
-
-              // b) Objekt-Map mit Zahl: BUTTON_PRESS_MACRO_6: 50,
-              if (updated === before && /BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
-                updated = updated.replace(
-                  /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*\d+)(,?)/g,
-                  (_, indent, q, val, comma) =>
-                    `${indent}${q}BUTTON_PRESS_MACRO_6${q}${val},\n${indent}${q}BUTTON_PRESS_MACRO_7${q}: ${macro7Id},\n${indent}${q}BUTTON_PRESS_MACRO_8${q}: ${macro8Id}${comma}`
-                );
-              }
-
-              // c) Locale / String-Map: 'BUTTON_PRESS_MACRO_6': 'Macro 6',
-              if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*['"][^'"]+['"]/.test(updated)) {
-                updated = updated.replace(
-                  /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*)(['"])([^'"]*?)6([^'"]*?)\4(,?)/g,
-                  (_, indent, kq, colon, vq, prefix, suffix, comma) =>
-                    `${indent}${kq}BUTTON_PRESS_MACRO_6${kq}${colon}${vq}${prefix}6${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_7${kq}${colon}${vq}${prefix}7${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_8${kq}${colon}${vq}${prefix}8${suffix}${vq}${comma}`
-                );
-              }
-
-              // d) Einfache Referenzlisten
-              if (
-                updated === before &&
-                /BUTTON_PRESS_MACRO_6(?![\w'":=])/.test(updated) &&
-                !updated.includes('BUTTON_PRESS_MACRO_7')
-              ) {
-                updated = updated.replace(
-                  /([ \t]*)([\w.]*BUTTON_PRESS_MACRO_6)(,?)/g,
-                  (_, indent, ref, comma) => {
-                    const ref7 = ref.replace('MACRO_6', 'MACRO_7');
-                    const ref8 = ref.replace('MACRO_6', 'MACRO_8');
-                    return `${indent}${ref},\n${indent}${ref7},\n${indent}${ref8}${comma}`;
-                  }
-                );
-              }
-
-              if (updated !== before) patchedGpioActionFiles++;
-            }
-
-            if (updated !== original) {
-              fs.writeFileSync(file, updated, 'utf8');
-              console.log(`✅ Web-UI gepatcht: ${file}`);
-            }
-          }
-
-          if (patchedMacroLimitCount === 0) {
-            console.log(
-              'ℹ️ Kein hartcodiertes 6er-Limit in www/src gefunden – Web-UI übernimmt macroList-Größe dynamisch von der Firmware.'
-            );
-          } else {
-            console.log(`✅ Hartcodierte Web-UI-Makrolimits in ${patchedMacroLimitCount} Datei(en) angepasst.`);
-          }
-
-          console.log(
-            `🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}, ${patchedGpioActionFiles} Web-UI GpioAction-Dateien) eingepatcht.`
-          );
-          EOF
-          node patch_8_macros.mjs
-          echo "--- Kontrollausgabe config_utils.cpp & input_macro.cpp ---"
-          grep -n -C 2 "BUTTON_PRESS_MACRO_6\|BUTTON_PRESS_MACRO_7\|BUTTON_PRESS_MACRO_8" src/config_utils.cpp src/addons/input_macro.cpp || true
-
-      - name: Configure & Build Firmware (inkl. Web UI)
-        env:
-          BOARD_CONFIG: ${{ inputs.board_config }}
-          PICO_SDK_FETCH_FROM_GIT: '1'
-        run: |
-          cmake -B build -G Ninja -DGP2040_BOARDCONFIG="$BOARD_CONFIG"
-          cmake --build build --parallel
-
-      - name: Upload Firmware Artifact (.uf2)
-        uses: actions/upload-artifact@v4
-        with:
-          name: GP2040-CE-${{ inputs.board_config }}-8Macros
-          path: build/*.uf2
-          if-no-files-found: error
+                const block7 = block
+                  .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
+                  .replace(/[5]/g, '[6]')
+                  .replace(/\(\s*5\s*\)/g, '(6)')
+                  .replace(/=\s*5\s*;/g, '= 6
