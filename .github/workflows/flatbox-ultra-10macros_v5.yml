@@ -1,4 +1,4 @@
-name: Flatbox Ultra S - 10 Macros x 22 Lines + Pin Mapping (All-in-One v4)
+name: Flatbox Ultra S - 10 Macros x 22 Lines + Pin Mapping (All-in-One v5)
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
             gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
             python3 python3-protobuf protobuf-compiler
 
-      - name: All-in-One Patch anwenden (10x22 Makros, fixed32-Optimierung, config_utils-Fix)
+      - name: All-in-One Patch anwenden (10x22 Makros, fixed32 + JSON-Macro-Fix)
         env:
           TARGET_INPUTS: ${{ inputs.max_macro_inputs }}
         run: |
@@ -350,6 +350,27 @@ jobs:
                                       out.append(c)
                                   return "\n".join(out)
                               text = line_pat.sub(expand_line, text)
+
+                  # X-Macro-Aliase für FIXED32/SFIXED32 in config_utils.cpp ergänzen (TO_JSON_FIXED32 / FROM_JSON_FIXED32)
+                  if path.name == "config_utils.cpp":
+                      def _add_fixed_aliases(src_text: str) -> str:
+                          out_lines = []
+                          for ln in src_text.splitlines():
+                              m_u = re.match(r"^([ \t]*)#define\s+([A-Z0-9_]+_)UINT32\b", ln)
+                              if m_u:
+                                  ind, pref = m_u.groups()
+                                  alias = f"{pref}FIXED32"
+                                  if f"#define {alias}" not in src_text and f"#define\t{alias}" not in src_text:
+                                      out_lines.append(f"{ind}#define {alias} {pref}UINT32")
+                              m_i = re.match(r"^([ \t]*)#define\s+([A-Z0-9_]+_)(?<!U)INT32\b", ln)
+                              if m_i:
+                                  ind, pref = m_i.groups()
+                                  alias = f"{pref}SFIXED32"
+                                  if f"#define {alias}" not in src_text and f"#define\t{alias}" not in src_text:
+                                      out_lines.append(f"{ind}#define {alias} {pref}INT32")
+                              out_lines.append(ln)
+                          return "\n".join(out_lines) + ("\n" if src_text.endswith("\n") else "")
+                      text = _add_fixed_aliases(text)
 
                   if path.name == "webconfig.cpp":
                       buf_pat = re.compile(r"(http_post_payload_len\s*=\s*)(\d+)(\s*;)")
