@@ -1,316 +1,367 @@
-name: Build Flatbox Ultra (8 Macros + Web UI)
+name: Build GP2040-CE (8 Macros)
 
 on:
   workflow_dispatch:
     inputs:
       board_config:
-        description: 'GP2040-CE Board Config'
+        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev5, FlatboxUltra, Haute42, Pico)'
         required: true
-        default: 'FlatboxRev5RGB'
-        type: choice
-        options:
-          - FlatboxRev5RGB
-          - FlatboxRev4
-          - FlatboxRev5USBPassthrough
-          - FlatboxUltra
-  push:
-    branches: [ main ]
+        default: 'FlatboxRev5'
+      max_macro_inputs:
+        description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (leer = Standard beibehalten)'
+        required: false
+        default: ''
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout GP2040-CE
+      - name: Checkout Repository (with Submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Checkout Pico SDK 2.1.1
-        run: |
-          git clone --depth 1 --branch 2.1.1 --recurse-submodules \
-            https://github.com/raspberrypi/pico-sdk.git "${{ github.workspace }}/pico-sdk"
-
-      - name: Setup Node.js 20
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install ARM Toolchain & Build Dependencies
+      - name: Install Build Dependencies & ARM Toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build build-essential pkg-config libusb-1.0-0-dev \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
-            python3 python3-pip python3-protobuf
-          pip3 install --user protobuf
+            cmake \
+            ninja-build \
+            build-essential \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            protobuf-compiler \
+            python3 \
+            python3-pip \
+            python3-protobuf
+          pip3 install --break-system-packages protobuf grpcio-tools
+
+      - name: Verify Board Config
+        env:
+          BOARD_CONFIG: ${{ inputs.board_config }}
+        run: |
+          if [ ! -d "configs/$BOARD_CONFIG" ]; then
+            echo "❌ Board-Config 'configs/$BOARD_CONFIG' nicht gefunden!"
+            echo "Verfügbare Boards in configs/:"
+            ls -1 configs/
+            exit 1
+          fi
+          echo "✅ Board-Config gefunden: configs/$BOARD_CONFIG"
 
       - name: Apply 8-Macro Patch (Firmware + Web UI)
+        env:
+          MAX_MACRO_INPUTS: ${{ inputs.max_macro_inputs }}
         run: |
           cat << 'EOF' > patch_8_macros.mjs
-import fs from 'fs';
-import path from 'path';
+          import fs from 'fs';
+          import path from 'path';
 
-const TARGET_MACROS = 8;
+          const TARGET_MACROS = 8;
+          const TARGET_INPUTS = process.env.MAX_MACRO_INPUTS
+            ? Number(process.env.MAX_MACRO_INPUTS)
+            : null;
 
-function walk(dir, files = []) {
-  if (!fs.existsSync(dir)) return files;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (['node_modules', 'dist', 'build', '.git'].includes(entry.name)) continue;
-      walk(full, files);
-    } else {
-      files.push(full);
-    }
-  }
-  return files;
-}
+          function walk(dir, files = []) {
+            if (!fs.existsSync(dir)) return files;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                if (['node_modules', 'dist', 'build', '.git'].includes(entry.name)) continue;
+                walk(full, files);
+              } else {
+                files.push(full);
+              }
+            }
+            return files;
+          }
 
-function patchFile(filePath, replacer, required = false) {
-  if (!fs.existsSync(filePath)) {
-    if (required) throw new Error(`❌ Pflichtdatei nicht gefunden: ${filePath}`);
-    console.warn(`⚠️ Übersprungen (nicht gefunden): ${filePath}`);
-    return false;
-  }
-  const original = fs.readFileSync(filePath, 'utf8');
-  const updated = replacer(original);
-  if (original !== updated) {
-    fs.writeFileSync(filePath, updated, 'utf8');
-    console.log(`✅ Gepatcht: ${filePath}`);
-    return true;
-  }
-  if (required) {
-    throw new Error(`❌ Patch hat in Pflichtdatei nicht gegriffen: ${filePath}`);
-  }
-  return false;
-}
+          function patchFile(filePath, replacer, required = false) {
+            if (!fs.existsSync(filePath)) {
+              if (required) throw new Error(`❌ Pflichtdatei nicht gefunden: ${filePath}`);
+              console.warn(`⚠️ Übersprungen (nicht gefunden): ${filePath}`);
+              return false;
+            }
+            const original = fs.readFileSync(filePath, 'utf8');
+            const updated = replacer(original);
+            if (original !== updated) {
+              fs.writeFileSync(filePath, updated, 'utf8');
+              console.log(`✅ Gepatcht: ${filePath}`);
+              return true;
+            }
+            if (required) {
+              throw new Error(`❌ Patch hat in Pflichtdatei nicht gegriffen: ${filePath}`);
+            }
+            return false;
+          }
 
-// 1. C++ Makro-Limit
-patchFile(
-  'headers/addons/input_macro.h',
-  (content) =>
-    content.replace(/#define\s+MAX_MACRO_LIMIT\s+\d+/, `#define MAX_MACRO_LIMIT ${TARGET_MACROS}`),
-  true
-);
+          // 1. C++ Makro-Limit (und optional Input-Limit)
+          patchFile(
+            'headers/addons/input_macro.h',
+            (content) => {
+              let out = content.replace(
+                /#define\s+MAX_MACRO_LIMIT\s+\d+/,
+                `#define MAX_MACRO_LIMIT ${TARGET_MACROS}`
+              );
+              if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
+                out = out.replace(
+                  /#define\s+MAX_MACRO_INPUT_LIMIT\s+\d+/,
+                  `#define MAX_MACRO_INPUT_LIMIT ${TARGET_INPUTS}`
+                );
+              }
+              return out;
+            },
+            true
+          );
 
-// 2. Protobuf Nanopb max_count (config.options ODER inline in config.proto)
-let patchedProtoLimit = false;
+          // 2. Protobuf Nanopb max_count (config.options ODER inline in config.proto)
+          let patchedProtoLimit = false;
 
-if (fs.existsSync('proto/config.options')) {
-  patchedProtoLimit = patchFile(
-    'proto/config.options',
-    (content) =>
-      content.replace(
-        /(MacroOptions\.macroList\s+max_count\s*:\s*)\d+/,
-        (_, p1) => `${p1}${TARGET_MACROS}`
-      ),
-    false
-  );
-}
+          if (fs.existsSync('proto/config.options')) {
+            patchedProtoLimit = patchFile(
+              'proto/config.options',
+              (content) => {
+                let out = content.replace(
+                  /(MacroOptions\.macroList\s+max_count\s*:\s*)\d+/,
+                  (_, p1) => `${p1}${TARGET_MACROS}`
+                );
+                if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
+                  out = out.replace(
+                    /(Macro\.macroInputs\s+max_count\s*:\s*)\d+/,
+                    (_, p1) => `${p1}${TARGET_INPUTS}`
+                  );
+                }
+                return out;
+              },
+              false
+            );
+          }
 
-if (!patchedProtoLimit && fs.existsSync('proto/config.proto')) {
-  patchedProtoLimit = patchFile(
-    'proto/config.proto',
-    (content) =>
-      content.replace(
-        /(macroList\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
-        (_, p1) => `${p1}${TARGET_MACROS}`
-      ),
-    false
-  );
-}
+          if (!patchedProtoLimit && fs.existsSync('proto/config.proto')) {
+            patchedProtoLimit = patchFile(
+              'proto/config.proto',
+              (content) => {
+                let out = content.replace(
+                  /(macroList\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
+                  (_, p1) => `${p1}${TARGET_MACROS}`
+                );
+                if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
+                  out = out.replace(
+                    /(macroInputs\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
+                    (_, p1) => `${p1}${TARGET_INPUTS}`
+                  );
+                }
+                return out;
+              },
+              false
+            );
+          }
 
-if (!patchedProtoLimit) {
-  throw new Error(
-    '❌ Konnte macroList max_count weder in proto/config.options noch in proto/config.proto patchen!'
-  );
-}
+          if (!patchedProtoLimit) {
+            throw new Error(
+              '❌ Konnte macroList max_count weder in proto/config.options noch in proto/config.proto patchen!'
+            );
+          }
 
-// 3. GpioAction Enum erweitern
-let macro7Id = null;
-let macro8Id = null;
+          // 3. GpioAction Enum erweitern
+          let macro7Id = null;
+          let macro8Id = null;
 
-patchFile(
-  'proto/enums.proto',
-  (content) => {
-    const enumMatch = content.match(/enum\s+GpioAction\s*\{([\s\S]*?)\}/);
-    if (!enumMatch) throw new Error('❌ enum GpioAction in proto/enums.proto nicht gefunden!');
+          patchFile(
+            'proto/enums.proto',
+            (content) => {
+              const enumMatch = content.match(/enum\s+GpioAction\s*\{([\s\S]*?)\}/);
+              if (!enumMatch) throw new Error('❌ enum GpioAction in proto/enums.proto nicht gefunden!');
 
-    const enumBlock = enumMatch[0];
-    const enumBody = enumMatch[1];
+              const enumBlock = enumMatch[0];
+              const enumBody = enumMatch[1];
 
-    if (enumBody.includes('BUTTON_PRESS_MACRO_7')) {
-      const m7 = enumBody.match(/BUTTON_PRESS_MACRO_7\s*=\s*(\d+)/);
-      const m8 = enumBody.match(/BUTTON_PRESS_MACRO_8\s*=\s*(\d+)/);
-      macro7Id = Number(m7[1]);
-      macro8Id = Number(m8[1]);
-      return content;
-    }
+              if (enumBody.includes('BUTTON_PRESS_MACRO_7')) {
+                const m7 = enumBody.match(/BUTTON_PRESS_MACRO_7\s*=\s*(\d+)/);
+                const m8 = enumBody.match(/BUTTON_PRESS_MACRO_8\s*=\s*(\d+)/);
+                macro7Id = Number(m7[1]);
+                macro8Id = Number(m8[1]);
+                return content;
+              }
 
-    const ids = [...enumBody.matchAll(/=\s*(\d+)\s*(?:\[[^\]]*\]\s*)?;/g)].map((m) => Number(m[1]));
-    const maxId = Math.max(...ids);
-    macro7Id = maxId + 1;
-    macro8Id = maxId + 2;
+              const ids = [...enumBody.matchAll(/=\s*(\d+)\s*(?:\[[^\]]*\]\s*)?;/g)].map((m) =>
+                Number(m[1])
+              );
+              const maxId = Math.max(...ids);
+              macro7Id = maxId + 1;
+              macro8Id = maxId + 2;
 
-    console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
+              console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
 
-    const updatedBlock = enumBlock.replace(
-      /\}\s*$/,
-      `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
-    );
+              const updatedBlock = enumBlock.replace(
+                /\}\s*$/,
+                `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
+              );
 
-    return content.replace(enumBlock, updatedBlock);
-  },
-  true
-);
+              return content.replace(enumBlock, updatedBlock);
+            },
+            true
+          );
 
-// 4. src/addons/input_macro.cpp erweitern
-patchFile(
-  'src/addons/input_macro.cpp',
-  (content) => {
-    if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
+          // 4. src/addons/input_macro.cpp erweitern
+          patchFile(
+            'src/addons/input_macro.cpp',
+            (content) => {
+              if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
 
-    let updated = content;
-    const caseBlockRegex =
-      /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
+              let updated = content;
+              const caseBlockRegex =
+                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
 
-    if (caseBlockRegex.test(updated)) {
-      updated = updated.replace(caseBlockRegex, (block) => {
-        const block7 = block
-          .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
-          .replace(/\[5\]/g, '[6]')
-          .replace(/\(\s*5\s*\)/g, '(6)')
-          .replace(/=\s*5\s*;/g, '= 6;')
-          .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}6`)
-          .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}6;`);
-        const block8 = block
-          .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
-          .replace(/\[5\]/g, '[7]')
-          .replace(/\(\s*5\s*\)/g, '(7)')
-          .replace(/=\s*5\s*;/g, '= 7;')
-          .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}7`)
-          .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}7;`);
-        return `${block}\n${block7}\n${block8}`;
-      });
-    } else {
-      updated = updated.replace(
-        /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
-        '$1,\n        GpioAction::BUTTON_PRESS_MACRO_7,\n        GpioAction::BUTTON_PRESS_MACRO_8'
-      );
-    }
+              if (caseBlockRegex.test(updated)) {
+                updated = updated.replace(caseBlockRegex, (block) => {
+                  const block7 = block
+                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
+                    .replace(/\[5\]/g, '[6]')
+                    .replace(/\(\s*5\s*\)/g, '(6)')
+                    .replace(/=\s*5\s*;/g, '= 6;')
+                    .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}6`)
+                    .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}6;`);
+                  const block8 = block
+                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
+                    .replace(/\[5\]/g, '[7]')
+                    .replace(/\(\s*5\s*\)/g, '(7)')
+                    .replace(/=\s*5\s*;/g, '= 7;')
+                    .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}7`)
+                    .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}7;`);
+                  return `${block}\n${block7}\n${block8}`;
+                });
+              } else {
+                updated = updated.replace(
+                  /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
+                  '$1,\n        GpioAction::BUTTON_PRESS_MACRO_7,\n        GpioAction::BUTTON_PRESS_MACRO_8'
+                );
+              }
 
-    return updated;
-  },
-  true
-);
+              return updated;
+            },
+            true
+          );
 
-// 5. Weitere C++-Fundstellen automatisch mitziehen
-for (const file of [...walk('src'), ...walk('headers')]) {
-  if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
-  const text = fs.readFileSync(file, 'utf8');
-  if (text.includes('BUTTON_PRESS_MACRO_6')) {
-    console.log(`🔎 Weiterer Fund in C++ (${file}) – wird automatisch erweitert...`);
-    patchFile(file, (content) => {
-      if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
-      return content.replace(
-        /(case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
-        '$1\n        case GpioAction::BUTTON_PRESS_MACRO_7:\n        case GpioAction::BUTTON_PRESS_MACRO_8:'
-      );
-    });
-  }
-}
+          // 5. Weitere C++-Fundstellen automatisch mitziehen
+          for (const file of [...walk('src'), ...walk('headers')]) {
+            if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
+            const text = fs.readFileSync(file, 'utf8');
+            if (text.includes('BUTTON_PRESS_MACRO_6')) {
+              console.log(`🔎 Weiterer Fund in C++ (${file}) – wird automatisch erweitert...`);
+              patchFile(file, (content) => {
+                if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
+                return content.replace(
+                  /(case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
+                  '$1\n        case GpioAction::BUTTON_PRESS_MACRO_7:\n        case GpioAction::BUTTON_PRESS_MACRO_8:'
+                );
+              });
+            }
+          }
 
-// 6. Web-UI patchen (inkl. .json Locales und sauberer Komma-Behandlung)
-const webFiles = walk('www/src');
-let patchedMacroUi = false;
+          // 6. Web-UI patchen (inkl. .json Locales und sauberer Komma-Behandlung)
+          const webFiles = walk('www/src');
+          let patchedMacroUi = false;
 
-for (const file of webFiles) {
-  if (!/\.(ts|tsx|js|jsx|json)$/.test(file)) continue;
-  const original = fs.readFileSync(file, 'utf8');
-  let updated = original;
+          for (const file of webFiles) {
+            if (!/\.(ts|tsx|js|jsx|json)$/.test(file)) continue;
+            const original = fs.readFileSync(file, 'utf8');
+            let updated = original;
 
-  if (
-    file.includes('InputMacro') ||
-    /MAX_MACRO_LIMIT/.test(updated) ||
-    /macroList\.length\s*[<>]=?\s*6/.test(updated)
-  ) {
-    updated = updated
-      .replace(/(MAX_MACRO_LIMIT\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-      .replace(/(macroList\.length\s*<\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-      .replace(/(macroList\.length\s*>=\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
-      .replace(/(macroList\.length\s*===?\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`);
-    if (updated !== original) patchedMacroUi = true;
-  }
+            if (
+              file.includes('InputMacro') ||
+              file.includes('Macro') ||
+              /MAX_MACRO_LIMIT/.test(updated) ||
+              /macroList\.length\s*[<>]=?\s*6/.test(updated)
+            ) {
+              updated = updated
+                .replace(/(MAX_MACRO_LIMIT\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+                .replace(/(macroList\.length\s*<\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+                .replace(/(macroList\.length\s*>=\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+                .replace(/(macroList\.length\s*===?\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`);
+              if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
+                updated = updated.replace(
+                  /(MAX_MACRO_INPUT_LIMIT\s*=\s*)\d+/g,
+                  (_, p1) => `${p1}${TARGET_INPUTS}`
+                );
+              }
+              if (updated !== original) patchedMacroUi = true;
+            }
 
-  if (
-    updated.includes('BUTTON_PRESS_MACRO_6') &&
-    !updated.includes('BUTTON_PRESS_MACRO_7')
-  ) {
-    if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
-      updated = updated.replace(
-        /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*\d+)(,?)/g,
-        (_, indent, q, val, comma) =>
-          `${indent}${q}BUTTON_PRESS_MACRO_6${q}${val},\n${indent}${q}BUTTON_PRESS_MACRO_7${q}: ${macro7Id},\n${indent}${q}BUTTON_PRESS_MACRO_8${q}: ${macro8Id}${comma}`
-      );
-    }
+            if (
+              updated.includes('BUTTON_PRESS_MACRO_6') &&
+              !updated.includes('BUTTON_PRESS_MACRO_7')
+            ) {
+              if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
+                updated = updated.replace(
+                  /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*\d+)(,?)/g,
+                  (_, indent, q, val, comma) =>
+                    `${indent}${q}BUTTON_PRESS_MACRO_6${q}${val},\n${indent}${q}BUTTON_PRESS_MACRO_7${q}: ${macro7Id},\n${indent}${q}BUTTON_PRESS_MACRO_8${q}: ${macro8Id}${comma}`
+                );
+              }
 
-    if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*['"][^'"]+['"]/.test(updated)) {
-      updated = updated.replace(
-        /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*)(['"])([^'"]*?)6([^'"]*?)\4(,?)/g,
-        (_, indent, kq, colon, vq, prefix, suffix, comma) =>
-          `${indent}${kq}BUTTON_PRESS_MACRO_6${kq}${colon}${vq}${prefix}6${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_7${kq}${colon}${vq}${prefix}7${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_8${kq}${colon}${vq}${prefix}8${suffix}${vq}${comma}`
-      );
-    }
+              if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*['"][^'"]+['"]/.test(updated)) {
+                updated = updated.replace(
+                  /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*)(['"])([^'"]*?)6([^'"]*?)\4(,?)/g,
+                  (_, indent, kq, colon, vq, prefix, suffix, comma) =>
+                    `${indent}${kq}BUTTON_PRESS_MACRO_6${kq}${colon}${vq}${prefix}6${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_7${kq}${colon}${vq}${prefix}7${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_8${kq}${colon}${vq}${prefix}8${suffix}${vq}${comma}`
+                );
+              }
 
-    if (
-      /BUTTON_PRESS_MACRO_6(?![\w'":])/.test(updated) &&
-      !updated.includes('BUTTON_PRESS_MACRO_7')
-    ) {
-      updated = updated.replace(
-        /([ \t]*)([\w.]*BUTTON_PRESS_MACRO_6)(,?)/g,
-        (_, indent, ref, comma) => {
-          const ref7 = ref.replace('MACRO_6', 'MACRO_7');
-          const ref8 = ref.replace('MACRO_6', 'MACRO_8');
-          return `${indent}${ref},\n${indent}${ref7},\n${indent}${ref8}${comma}`;
-        }
-      );
-    }
-  }
+              if (
+                /BUTTON_PRESS_MACRO_6(?![\w'":])/.test(updated) &&
+                !updated.includes('BUTTON_PRESS_MACRO_7')
+              ) {
+                updated = updated.replace(
+                  /([ \t]*)([\w.]*BUTTON_PRESS_MACRO_6)(,?)/g,
+                  (_, indent, ref, comma) => {
+                    const ref7 = ref.replace('MACRO_6', 'MACRO_7');
+                    const ref8 = ref.replace('MACRO_6', 'MACRO_8');
+                    return `${indent}${ref},\n${indent}${ref7},\n${indent}${ref8}${comma}`;
+                  }
+                );
+              }
+            }
 
-  if (updated !== original) {
-    fs.writeFileSync(file, updated, 'utf8');
-    console.log(`✅ Web-UI gepatcht: ${file}`);
-  }
-}
+            if (updated !== original) {
+              fs.writeFileSync(file, updated, 'utf8');
+              console.log(`✅ Web-UI gepatcht: ${file}`);
+            }
+          }
 
-if (!patchedMacroUi) {
-  throw new Error('❌ Macro-Limit in der Web-UI (www/src) wurde nicht gefunden!');
-}
+          if (!patchedMacroUi) {
+            throw new Error('❌ Macro-Limit in der Web-UI (www/src) wurde nicht gefunden!');
+          }
 
-console.log(`🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}) komplett eingepatcht.`);
-EOF
-node patch_8_macros.mjs
+          console.log(
+            `🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}) komplett eingepatcht.`
+          );
+          EOF
+          node patch_8_macros.mjs
 
-      - name: Build Web UI
+      - name: Build Web Configurator UI
         working-directory: www
         run: |
           npm ci
           npm run build
 
-      - name: Configure & Build Firmware + Embedded Web UI
+      - name: Configure & Build Firmware
         env:
-          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
-          GP2040_BOARDCONFIG: ${{ inputs.board_config || 'FlatboxRev5RGB' }}
+          BOARD_CONFIG: ${{ inputs.board_config }}
+          PICO_SDK_FETCH_FROM_GIT: '1'
         run: |
-          cmake -B build -G Ninja \
-            -DPICO_SDK_PATH="${PICO_SDK_PATH}" \
-            -DGP2040_BOARDCONFIG="${GP2040_BOARDCONFIG}"
-          cmake --build build --parallel $(nproc)
+          cmake -B build -G Ninja -DGP2040_BOARDCONFIG="$BOARD_CONFIG"
+          cmake --build build --parallel
 
-      - name: Upload UF2 Artifact
+      - name: Upload Firmware Artifact (.uf2)
         uses: actions/upload-artifact@v4
         with:
-          name: GP2040-CE-8Macros-${{ inputs.board_config || 'FlatboxRev5RGB' }}
+          name: GP2040-CE-${{ inputs.board_config }}-8Macros
           path: build/*.uf2
           if-no-files-found: error
