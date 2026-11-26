@@ -1,4 +1,4 @@
-name: Flatbox Ultra S - 10 Macros + Pin Mapping (All-in-One v3)
+name: Flatbox Ultra S - 10 Macros x 22 Lines + Pin Mapping (All-in-One v4)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ on:
         required: true
         default: "FlatboxRev4"
       max_macro_inputs:
-        description: "Zielwert Eingabezeilen pro Makro (min. 18 für bestehendes Backup)"
+        description: "Zielwert Eingabezeilen pro Makro (Standard: 22)"
         required: true
-        default: "20"
+        default: "22"
 
 jobs:
   build-firmware:
@@ -35,7 +35,7 @@ jobs:
             gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
             python3 python3-protobuf protobuf-compiler
 
-      - name: All-in-One Patch anwenden (10 Makros, Inline-Proto, IDs 143..146, 32-KB-Check)
+      - name: All-in-One Patch anwenden (10x22 Makros, fixed32-Optimierung, config_utils-Fix)
         env:
           TARGET_INPUTS: ${{ inputs.max_macro_inputs }}
         run: |
@@ -49,7 +49,7 @@ jobs:
 
           ROOT = pathlib.Path.cwd()
           MAX_MACROS = 10
-          MAX_LABEL_SIZE = 20
+          MAX_LABEL_SIZE = 16
           HTTP_POST_BUF_SIZE = 32768
           EEPROM_LIMIT = 32768
           MIN_SAFE_INPUTS = 18  # größtes Makro im Backup (Slot 2) hat 18 Zeilen
@@ -59,7 +59,7 @@ jobs:
               9: 145,
               10: 146,
           }
-          target_inputs = int(os.environ.get("TARGET_INPUTS", "20"))
+          target_inputs = int(os.environ.get("TARGET_INPUTS", "22"))
 
           def read_text(p: pathlib.Path) -> str:
               return p.read_text(encoding="utf-8")
@@ -128,10 +128,8 @@ jobs:
               write_text(enums_path, enums_text)
 
           print(f"[OK] proto/enums.proto -> MACRO_7..10 IDs: {macro_ids}")
-          if macro_ids != PREFERRED_MACRO_IDS:
-              print(f"[WARNUNG] Abweichende IDs gegenüber Backup ({PREFERRED_MACRO_IDS}) -> bitte im Pin-Mapping prüfen!")
 
-          # 3. Protobuf-Limits patchen: unterstützt SOWOHL proto/config.options ALS AUCH inline [(nanopb)...] in proto/config.proto
+          # 3. Protobuf-Limits + sichere 32-KB-Optimierung (fixed32 in MacroInput + ungenutzte String-Puffer)
           opts_path = ROOT / "proto" / "config.options"
           proto_path = ROOT / "proto" / "config.proto"
           opts_orig = read_text(opts_path) if opts_path.exists() else None
@@ -140,22 +138,55 @@ jobs:
           if opts_orig is None and proto_orig is None:
               sys.exit("[FEHLER] Weder proto/config.options noch proto/config.proto gefunden.")
 
-          def patch_inline_proto(text: str, field_regex: str, option_name: str, new_val: int):
+          def patch_inline_proto(text: str, field_regex: str, option_name: str, new_val: int, shrink_only: bool = False):
               count = 0
               out_lines = []
               for line in text.splitlines():
                   if re.search(field_regex, line, flags=re.I) and option_name in line:
-                      new_line, c = re.subn(rf"({option_name}\s*[:=]\s*)\d+", rf"\g<1>{new_val}", line)
-                      if c > 0:
-                          count += c
+                      def _repl(m: re.Match) -> str:
+                          old_v = int(m.group(2))
+                          if shrink_only and old_v <= new_val:
+                              return m.group(0)
+                          return f"{m.group(1)}{new_val}"
+                      new_line = re.sub(rf"({option_name}\s*[:=]\s*)(\d+)", _repl, line)
+                      if new_line != line:
+                          count += 1
                           line = new_line
                   out_lines.append(line)
               return "\n".join(out_lines) + ("\n" if text.endswith("\n") else ""), count
 
-          def apply_macro_proto_limits(inputs_count: int) -> None:
+          def optimize_macro_input_wire_types(proto_text: str):
+              """
+              Ersetzt in message MacroInput uint32 -> fixed32 (und int32 -> sfixed32).
+              C++-Struct-Typen bleiben identisch (uint32_t / int32_t), aber nanopb spart
+              3 Bytes pro MacroInput im worst-case Config_size (bei 10x22 = 660 Bytes!).
+              """
+              m = re.search(r"(message\s+MacroInput\s*\{)(.*?)(\n\})", proto_text, flags=re.S)
+              if not m:
+                  return proto_text, 0
+              hdr, bdy, ftr = m.groups()
+              new_bdy = re.sub(r"\buint32\b", "fixed32", bdy)
+              new_bdy = re.sub(r"\bint32\b", "sfixed32", new_bdy)
+              changed = 1 if new_bdy != bdy else 0
+              return proto_text[:m.start()] + hdr + new_bdy + ftr + proto_text[m.end():], changed
+
+          # Sichere String-Kürzungen (alles über den tatsächlich genutzten Werten im Backup,
+          # keine Arrays, kein PS4-Auth, kein Splash-Image, keine LEDs)
+          SAFE_STRING_TRIMS = [
+              (r"\bsplashTextLine[123]\b", 12),        # im Backup leer (splashTextEnabled=0)
+              (r"\badvancedSOCD[1-4]Name\b", 8),       # im Backup leer (advancedSOCDEnabled=0)
+              (r"\busbDescManufacturer\b", 28),        # im Backup "Open Stick Community" (20 Zeichen)
+              (r"\busbDescProduct\b", 28),             # im Backup "GP2040-CE (Custom)" (18 Zeichen)
+              (r"\busbDescVersion\b", 8),              # im Backup "1.0" (3 Zeichen)
+              (r"\bprofileLabel\b", 16),               # im Backup "MK 11" (5 Zeichen)
+          ]
+
+          def apply_macro_proto_limits(inputs_count: int, compact_strings: bool = True) -> None:
               c_list = 0
               c_inputs = 0
               c_label = 0
+              c_fixed = 0
+              c_trims = 0
 
               if opts_orig is not None:
                   t = opts_orig
@@ -173,19 +204,21 @@ jobs:
                   p, p1 = patch_inline_proto(p, r"\bmacro_?list\b", "max_count", MAX_MACROS)
                   p, p2 = patch_inline_proto(p, r"\bmacro_?inputs\b", "max_count", inputs_count)
                   p, p3 = patch_inline_proto(p, r"\bmacro_?label\b", "max_size", MAX_LABEL_SIZE)
+                  p, c_fixed = optimize_macro_input_wire_types(p)
+                  if compact_strings:
+                      for regex, max_len in SAFE_STRING_TRIMS:
+                          p, cnt = patch_inline_proto(p, regex, "max_size", max_len, shrink_only=True)
+                          c_trims += cnt
                   c_list += p1
                   c_inputs += p2
                   c_label += p3
-                  if p1 or p2 or p3:
+                  if p1 or p2 or p3 or c_fixed or c_trims:
                       write_text(proto_path, p)
 
               if c_list == 0 or c_inputs == 0:
-                  print("[DEBUG] Macro-relevante Zeilen in proto/config.proto:")
-                  if proto_orig:
-                      for idx, ln in enumerate(proto_orig.splitlines(), 1):
-                          if "macro" in ln.lower():
-                              print(f"  L{idx}: {ln}")
-                  sys.exit(f"[FEHLER] Konnte Macro-Limits weder in config.options noch in config.proto finden (list={c_list}, inputs={c_inputs}).")
+                  sys.exit(f"[FEHLER] Konnte Macro-Limits nicht finden (list={c_list}, inputs={c_inputs}).")
+
+              return c_fixed, c_trims
 
           nanopb_gens = list(ROOT.rglob("nanopb_generator.py"))
           nanopb_protos = list(ROOT.rglob("nanopb.proto"))
@@ -229,16 +262,14 @@ jobs:
 
           final_inputs = target_inputs
           while final_inputs >= 12:
-              apply_macro_proto_limits(final_inputs)
+              c_fixed, c_trims = apply_macro_proto_limits(final_inputs, compact_strings=True)
               size = measure_config_size()
               if size is None:
                   print(f"[INFO] 32-KB-Vorprüfung nicht verfügbar, nutze Zielwert: {final_inputs} Zeilen.")
                   break
-              print(f"[CHECK] 10 Slots x {final_inputs} Zeilen -> Config_size = {size} / {EEPROM_LIMIT} Bytes")
+              print(f"[CHECK] 10 Slots x {final_inputs} Zeilen (fixed32={c_fixed}, trims={c_trims}) -> Config_size = {size} / {EEPROM_LIMIT} Bytes")
               if size <= EEPROM_LIMIT:
                   print(f"[OK] Passt sauber in 32 KB (Reserve: {EEPROM_LIMIT - size} Bytes).")
-                  if final_inputs < MIN_SAFE_INPUTS:
-                      print(f"[WARNUNG] Finale Zeilenanzahl ({final_inputs}) liegt unter 18 (Slot 2 im Backup hat 18 Zeilen).")
                   break
               final_inputs -= 1
           else:
@@ -260,12 +291,20 @@ jobs:
                   text = re.sub(r"(#define\s+MAX_MACRO_LIMIT\s+)\d+", rf"\g<1>{MAX_MACROS}", text)
                   text = re.sub(r"(#define\s+MAX_MACRO_INPUT_LIMIT\s+)\d+", rf"\g<1>{final_inputs}", text)
 
+                  # Eventuelle hartcodierte Array-Größen wie macroPinMasks[6] oder actionList[6] auf MAX_MACRO_LIMIT heben
+                  text = re.sub(r"\b(macroPinMasks\s*\[\s*)(?:6|8)(\s*\])", r"\g<1>MAX_MACRO_LIMIT\g<2>", text)
+                  if "BUTTON_PRESS_MACRO_1" in text and "actionList[" in text:
+                      text = re.sub(r"\b(actionList\s*\[\s*)(?:6|8)(\s*\])", r"\g<1>MAX_MACRO_LIMIT\g<2>", text)
+
                   found_nums = [int(x) for x in re.findall(r"BUTTON_PRESS_MACRO_(\d+)", text)]
                   if found_nums:
                       highest = max(found_nums)
                       if highest < MAX_MACROS:
+                          patched_here = False
+
+                          # Fall A: switch/case Block (mit break; oder return;)
                           case_pat = re.compile(
-                              rf"([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_{highest}\s*:.*?break\s*;)",
+                              rf"([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_{highest}\s*:.*?(?:break|return[^;]*)\s*;)",
                               flags=re.S,
                           )
                           def expand_case(m: re.Match) -> str:
@@ -276,12 +315,32 @@ jobs:
                                   c = c.replace(f"[{highest - 1}]", f"[{n - 1}]")
                                   out.append(c)
                               return "\n".join(out)
-                          text, cnt = case_pat.subn(expand_case, text)
+                          text, cnt_case = case_pat.subn(expand_case, text)
+                          if cnt_case > 0:
+                              patched_here = True
 
-                          if cnt == 0:
-                              line_pat = re.compile(rf"^([ \t]*.*BUTTON_PRESS_MACRO_{highest}.*)$", flags=re.M)
+                          # Fall B: Array-/Initializer-Ende auf einer Zeile wie
+                          #   "... GpioAction::BUTTON_PRESS_MACRO_6 };" (z. B. src/config_utils.cpp:2257)
+                          init_pat = re.compile(
+                              rf"(GpioAction::BUTTON_PRESS_MACRO_{highest})(\s*\}}\s*;)"
+                          )
+                          def expand_init(m: re.Match) -> str:
+                              extras = ", ".join(f"GpioAction::BUTTON_PRESS_MACRO_{n}" for n in range(highest + 1, MAX_MACROS + 1))
+                              return f"{m.group(1)}, {extras}{m.group(2)}"
+                          text, cnt_init = init_pat.subn(expand_init, text)
+                          if cnt_init > 0:
+                              patched_here = True
+
+                          # Fall C: Einzelzeilen-Eintrag (nur wenn KEIN ';' und KEIN '}' und nur 1 MACRO auf der Zeile)
+                          if not patched_here:
+                              line_pat = re.compile(
+                                  rf"^([ \t]*[^;\}}\n]*BUTTON_PRESS_MACRO_{highest}[^;\}}\n]*)$",
+                                  flags=re.M,
+                              )
                               def expand_line(m: re.Match) -> str:
                                   line = m.group(1)
+                                  if len(re.findall(r"BUTTON_PRESS_MACRO_\d+", line)) != 1:
+                                      return line
                                   out = [line if line.rstrip().endswith(",") else line + ","]
                                   for n in range(highest + 1, MAX_MACROS + 1):
                                       c = line.replace(f"BUTTON_PRESS_MACRO_{highest}", f"BUTTON_PRESS_MACRO_{n}")
@@ -350,9 +409,9 @@ jobs:
 
               if "macro" in ts_file.name.lower():
                   text = re.sub(r"\b(MAX_MACROS\s*=\s*)(?:6|8)\b", rf"\g<1>{MAX_MACROS}", text)
-                  text = re.sub(r"\b(MAX_MACRO_INPUTS\s*=\s*)(?:25|30)\b", rf"\g<1>{final_inputs}", text)
+                  text = re.sub(r"\b(MAX_MACRO_INPUTS\s*=\s*)(?:18|20|25|30)\b", rf"\g<1>{final_inputs}", text)
                   text = re.sub(r"(\.length\s*(?:<|>=|===)\s*)(?:6|8)\b", rf"\g<1>{MAX_MACROS}", text)
-                  text = re.sub(r"(\.length\s*(?:<|>=|===)\s*)(?:25|30)\b", rf"\g<1>{final_inputs}", text)
+                  text = re.sub(r"(\.length\s*(?:<|>=|===)\s*)(?:18|20|25|30)\b", rf"\g<1>{final_inputs}", text)
 
               if text != orig:
                   write_text(ts_file, text)
