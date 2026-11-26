@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       board_config:
-        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev5, FlatboxUltra, Haute42, Pico)'
+        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev4, FlatboxRev5, FlatboxUltra, Haute42, Pico)'
         required: true
-        default: 'FlatboxRev5'
+        default: 'FlatboxRev4'
       max_macro_inputs:
         description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (z.B. 20, 22 oder 25; leer = Standard)'
         required: false
@@ -215,7 +215,11 @@ jobs:
             (content) => {
               if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
 
-              let updated = content;
+              let updated = content.replace(
+                /(\bGpioAction\s+\w+\s*)\[\s*6\s*\]/g,
+                (_, p1) => `${p1}[${TARGET_MACROS}]`
+              );
+
               const caseBlockRegex =
                 /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
 
@@ -237,6 +241,11 @@ jobs:
                     .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}7;`);
                   return `${block}\n${block7}\n${block8}`;
                 });
+              } else if (/<=\s*GpioAction::BUTTON_PRESS_MACRO_6\b/.test(updated)) {
+                updated = updated.replace(
+                  /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
+                  (_, p1) => `${p1}${TARGET_MACROS}`
+                );
               } else {
                 updated = updated.replace(
                   /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
@@ -249,7 +258,7 @@ jobs:
             true
           );
 
-          // 5. Weitere C++-Fundstellen (switch/case, Map-Tabellen, Bereichsprüfungen)
+          // 5. Weitere C++-Fundstellen (Array-Größen, switch/case, Map-Tabellen, Bereichsprüfungen)
           for (const file of [...walk('src'), ...walk('headers')]) {
             if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
             const text = fs.readFileSync(file, 'utf8');
@@ -262,7 +271,13 @@ jobs:
               }
               let out = content;
 
-              // a) switch-case
+              // a) Feste GpioAction-Arrays von [6] auf [8] hochsetzen (z.B. migrateMacroPinsToGpio)
+              out = out.replace(
+                /(\bGpioAction\s+\w+\s*)\[\s*6\s*\]/g,
+                (_, p1) => `${p1}[${TARGET_MACROS}]`
+              );
+
+              // b) switch-case
               out = out.replace(
                 /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
                 (match) => {
@@ -271,7 +286,7 @@ jobs:
                 }
               );
 
-              // b) Map-/Struct-Einträge wie { GpioAction::BUTTON_PRESS_MACRO_6, "M6" },
+              // c) Map-/Struct-Einträge wie { GpioAction::BUTTON_PRESS_MACRO_6, "M6" },
               out = out.replace(
                 /([ \t]*\{\s*GpioAction::BUTTON_PRESS_MACRO_6\s*,\s*([^}\n]*?)\s*\})(,?)/g,
                 (_, entry, secondArg, comma) => {
@@ -285,14 +300,14 @@ jobs:
                 }
               );
 
-              // c) Bereichsprüfungen wie action <= GpioAction::BUTTON_PRESS_MACRO_6
+              // d) Bereichsprüfungen wie action <= GpioAction::BUTTON_PRESS_MACRO_6
               out = out.replace(
                 /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
-                (_, p1) => `${p1}8`
+                (_, p1) => `${p1}${TARGET_MACROS}`
               );
 
-              // d) Listen-Einträge wie GpioAction::BUTTON_PRESS_MACRO_6,
-              if (out === content) {
+              // e) Listen-/Array-Einträge wie GpioAction::BUTTON_PRESS_MACRO_6
+              if (!out.includes('BUTTON_PRESS_MACRO_7') && !out.includes('BUTTON_PRESS_MACRO_8')) {
                 out = out.replace(
                   /([ \t]*)(GpioAction::BUTTON_PRESS_MACRO_6)(,?)/g,
                   (_, indent, ref, comma) =>
@@ -417,19 +432,10 @@ jobs:
           );
           EOF
           node patch_8_macros.mjs
+          echo "--- Kontrollausgabe config_utils.cpp & input_macro.cpp ---"
+          grep -n -C 2 "BUTTON_PRESS_MACRO_6\|BUTTON_PRESS_MACRO_7\|BUTTON_PRESS_MACRO_8" src/config_utils.cpp src/addons/input_macro.cpp || true
 
-      - name: Build Web Configurator UI
-        working-directory: www
-        run: |
-          npm ci
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['proto'] ? 0 : 1)"; then
-            npm run proto
-          elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['generate-proto'] ? 0 : 1)"; then
-            npm run generate-proto
-          fi
-          npm run build
-
-      - name: Configure & Build Firmware
+      - name: Configure & Build Firmware (inkl. Web UI)
         env:
           BOARD_CONFIG: ${{ inputs.board_config }}
           PICO_SDK_FETCH_FROM_GIT: '1'
