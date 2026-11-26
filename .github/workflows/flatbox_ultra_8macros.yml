@@ -8,9 +8,9 @@ on:
         required: true
         default: 'FlatboxRev5'
       max_macro_inputs:
-        description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (leer = Standard beibehalten)'
+        description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (z.B. 20, 22 oder 25; leer = Standard)'
         required: false
-        default: ''
+        default: '20'
 
 jobs:
   build:
@@ -249,56 +249,120 @@ jobs:
             true
           );
 
-          // 5. Weitere C++-Fundstellen automatisch mitziehen
+          // 5. Weitere C++-Fundstellen (switch/case, Map-Tabellen, Bereichsprüfungen)
           for (const file of [...walk('src'), ...walk('headers')]) {
             if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
             const text = fs.readFileSync(file, 'utf8');
-            if (text.includes('BUTTON_PRESS_MACRO_6')) {
-              console.log(`🔎 Weiterer Fund in C++ (${file}) – wird automatisch erweitert...`);
-              patchFile(file, (content) => {
-                if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
-                return content.replace(
-                  /(case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
-                  '$1\n        case GpioAction::BUTTON_PRESS_MACRO_7:\n        case GpioAction::BUTTON_PRESS_MACRO_8:'
+            if (!text.includes('BUTTON_PRESS_MACRO_6')) continue;
+
+            console.log(`🔎 Weiterer Fund in C++ (${file}) – wird analysiert...`);
+            const changed = patchFile(file, (content) => {
+              if (content.includes('BUTTON_PRESS_MACRO_7') || content.includes('BUTTON_PRESS_MACRO_8')) {
+                return content;
+              }
+              let out = content;
+
+              // a) switch-case
+              out = out.replace(
+                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
+                (match) => {
+                  const indent = match.match(/^([ \t]*)/)[1];
+                  return `${match}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:`;
+                }
+              );
+
+              // b) Map-/Struct-Einträge wie { GpioAction::BUTTON_PRESS_MACRO_6, "M6" },
+              out = out.replace(
+                /([ \t]*\{\s*GpioAction::BUTTON_PRESS_MACRO_6\s*,\s*([^}\n]*?)\s*\})(,?)/g,
+                (_, entry, secondArg, comma) => {
+                  const entry7 = entry
+                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
+                    .replace(secondArg, secondArg.replace(/6/g, '7'));
+                  const entry8 = entry
+                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
+                    .replace(secondArg, secondArg.replace(/6/g, '8'));
+                  return `${entry},\n${entry7},\n${entry8}${comma}`;
+                }
+              );
+
+              // c) Bereichsprüfungen wie action <= GpioAction::BUTTON_PRESS_MACRO_6
+              out = out.replace(
+                /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
+                (_, p1) => `${p1}8`
+              );
+
+              // d) Listen-Einträge wie GpioAction::BUTTON_PRESS_MACRO_6,
+              if (out === content) {
+                out = out.replace(
+                  /([ \t]*)(GpioAction::BUTTON_PRESS_MACRO_6)(,?)/g,
+                  (_, indent, ref, comma) =>
+                    `${indent}${ref},\n${indent}GpioAction::BUTTON_PRESS_MACRO_7,\n${indent}GpioAction::BUTTON_PRESS_MACRO_8${comma}`
                 );
+              }
+
+              return out;
+            });
+
+            if (!changed) {
+              const lines = text.split('\n');
+              lines.forEach((line, idx) => {
+                if (line.includes('BUTTON_PRESS_MACRO_6')) {
+                  console.warn(`⚠️ Ungepatchte Zeile in ${file}:${idx + 1}: ${line.trim()}`);
+                }
               });
             }
           }
 
-          // 6. Web-UI patchen (inkl. .json Locales und sauberer Komma-Behandlung)
+          // 6. Web-UI patchen (Locales, TS-Enums, optionale Hardcoded-Limits)
           const webFiles = walk('www/src');
-          let patchedMacroUi = false;
+          let patchedMacroLimitCount = 0;
+          let patchedGpioActionFiles = 0;
 
           for (const file of webFiles) {
             if (!/\.(ts|tsx|js|jsx|json)$/.test(file)) continue;
             const original = fs.readFileSync(file, 'utf8');
             let updated = original;
 
-            if (
-              file.includes('InputMacro') ||
-              file.includes('Macro') ||
-              /MAX_MACRO_LIMIT/.test(updated) ||
-              /macroList\.length\s*[<>]=?\s*6/.test(updated)
-            ) {
+            const isMacroFile =
+              /macro/i.test(file) ||
+              /MAX_MACRO_|MACRO_LIMIT|macroList|macroInputs/.test(updated);
+
+            if (isMacroFile) {
+              const before = updated;
               updated = updated
-                .replace(/(MAX_MACRO_LIMIT\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+                .replace(/((?:MAX_MACRO_LIMIT|MAX_MACROS|MACRO_LIMIT)\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
                 .replace(/(macroList\.length\s*<\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
                 .replace(/(macroList\.length\s*>=\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
                 .replace(/(macroList\.length\s*===?\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`);
+
               if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
-                updated = updated.replace(
-                  /(MAX_MACRO_INPUT_LIMIT\s*=\s*)\d+/g,
-                  (_, p1) => `${p1}${TARGET_INPUTS}`
-                );
+                updated = updated
+                  .replace(/((?:MAX_MACRO_INPUT_LIMIT|MAX_MACRO_INPUTS|MACRO_INPUT_LIMIT)\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
+                  .replace(/(macroInputs\.length\s*<\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
+                  .replace(/(macroInputs\.length\s*>=\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`)
+                  .replace(/(macroInputs\.length\s*===?\s*)30\b/g, (_, p1) => `${p1}${TARGET_INPUTS}`);
               }
-              if (updated !== original) patchedMacroUi = true;
+
+              if (updated !== before) patchedMacroLimitCount++;
             }
 
             if (
               updated.includes('BUTTON_PRESS_MACRO_6') &&
               !updated.includes('BUTTON_PRESS_MACRO_7')
             ) {
-              if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
+              const before = updated;
+
+              // a) TypeScript Enum: BUTTON_PRESS_MACRO_6 = 50,
+              if (/BUTTON_PRESS_MACRO_6\s*=\s*\d+/.test(updated)) {
+                updated = updated.replace(
+                  /([ \t]*)BUTTON_PRESS_MACRO_6(\s*=\s*\d+)(,?)/g,
+                  (_, indent, val, comma) =>
+                    `${indent}BUTTON_PRESS_MACRO_6${val},\n${indent}BUTTON_PRESS_MACRO_7 = ${macro7Id},\n${indent}BUTTON_PRESS_MACRO_8 = ${macro8Id}${comma}`
+                );
+              }
+
+              // b) Objekt-Map mit Zahl: BUTTON_PRESS_MACRO_6: 50,
+              if (updated === before && /BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
                 updated = updated.replace(
                   /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*\d+)(,?)/g,
                   (_, indent, q, val, comma) =>
@@ -306,6 +370,7 @@ jobs:
                 );
               }
 
+              // c) Locale / String-Map: 'BUTTON_PRESS_MACRO_6': 'Macro 6',
               if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*['"][^'"]+['"]/.test(updated)) {
                 updated = updated.replace(
                   /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*)(['"])([^'"]*?)6([^'"]*?)\4(,?)/g,
@@ -314,8 +379,10 @@ jobs:
                 );
               }
 
+              // d) Einfache Referenzlisten
               if (
-                /BUTTON_PRESS_MACRO_6(?![\w'":])/.test(updated) &&
+                updated === before &&
+                /BUTTON_PRESS_MACRO_6(?![\w'":=])/.test(updated) &&
                 !updated.includes('BUTTON_PRESS_MACRO_7')
               ) {
                 updated = updated.replace(
@@ -327,6 +394,8 @@ jobs:
                   }
                 );
               }
+
+              if (updated !== before) patchedGpioActionFiles++;
             }
 
             if (updated !== original) {
@@ -335,12 +404,16 @@ jobs:
             }
           }
 
-          if (!patchedMacroUi) {
-            throw new Error('❌ Macro-Limit in der Web-UI (www/src) wurde nicht gefunden!');
+          if (patchedMacroLimitCount === 0) {
+            console.log(
+              'ℹ️ Kein hartcodiertes 6er-Limit in www/src gefunden – Web-UI übernimmt macroList-Größe dynamisch von der Firmware.'
+            );
+          } else {
+            console.log(`✅ Hartcodierte Web-UI-Makrolimits in ${patchedMacroLimitCount} Datei(en) angepasst.`);
           }
 
           console.log(
-            `🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}) komplett eingepatcht.`
+            `🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}, ${patchedGpioActionFiles} Web-UI GpioAction-Dateien) eingepatcht.`
           );
           EOF
           node patch_8_macros.mjs
@@ -349,6 +422,11 @@ jobs:
         working-directory: www
         run: |
           npm ci
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['proto'] ? 0 : 1)"; then
+            npm run proto
+          elif node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['generate-proto'] ? 0 : 1)"; then
+            npm run generate-proto
+          fi
           npm run build
 
       - name: Configure & Build Firmware
