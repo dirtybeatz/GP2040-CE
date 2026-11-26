@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       board_config:
-        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev4, FlatboxRev5, FlatboxUltra, Haute42, Pico)'
+        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev4, FlatboxRev5, Haute42COSMOX, Pico)'
         required: true
-        default: 
+        default: 'FlatboxRev4'
       max_macro_inputs:
         description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (z.B. 20, 22 oder 25; leer = Standard)'
         required: false
-        default: 
+        default: '20'
 
 jobs:
   build:
@@ -45,15 +45,15 @@ jobs:
 
       - name: Verify Board Config
         env:
-          BOARD_CONFIG: \{{ inputs.board_config }}
+          BOARD_CONFIG: \${{ inputs.board_config }}
         run: |
-          if [ ! -d "configs/\BOARD_CONFIG" ]; then
-            echo "❌ Board-Config 'configs/\BOARD_CONFIG' nicht gefunden!"
+          if [ ! -d "configs/\$BOARD_CONFIG" ]; then
+            echo "❌ Board-Config 'configs/\$BOARD_CONFIG' nicht gefunden!"
             echo "Verfügbare Boards in configs/:"
             ls -1 configs/
             exit 1
           fi
-          echo "✅ Board-Config gefunden: configs/\BOARD_CONFIG"
+          echo "✅ Board-Config gefunden: configs/\$BOARD_CONFIG"
 
       - name: Apply 8-Macro Patch (Firmware + Web UI)
         env:
@@ -125,128 +125,3 @@ jobs:
 
           if (fs.existsSync('proto/config.options')) {
             patchedProtoLimit = patchFile(
-              'proto/config.options',
-              (content) => {
-                let out = content.replace(
-                  /(MacroOptions\.macroList\s+max_count\s*:\s*)\d+/,
-                  (_, p1) => `${p1}${TARGET_MACROS}`
-                );
-                if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
-                  out = out.replace(
-                    /(Macro\.macroInputs\s+max_count\s*:\s*)\d+/,
-                    (_, p1) => `${p1}${TARGET_INPUTS}`
-                  );
-                }
-                return out;
-              },
-              false
-            );
-          }
-
-          if (!patchedProtoLimit && fs.existsSync('proto/config.proto')) {
-            patchedProtoLimit = patchFile(
-              'proto/config.proto',
-              (content) => {
-                let out = content.replace(
-                  /(macroList\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
-                  (_, p1) => `${p1}${TARGET_MACROS}`
-                );
-                if (TARGET_INPUTS && Number.isInteger(TARGET_INPUTS) && TARGET_INPUTS > 0) {
-                  out = out.replace(
-                    /(macroInputs\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
-                    (_, p1) => `${p1}${TARGET_INPUTS}`
-                  );
-                }
-                return out;
-              },
-              false
-            );
-          }
-
-          if (!patchedProtoLimit) {
-            throw new Error(
-              '❌ Konnte macroList max_count weder in proto/config.options noch in proto/config.proto patchen!'
-            );
-          }
-
-          // 3. GpioAction Enum erweitern
-          let macro7Id = null;
-          let macro8Id = null;
-
-          patchFile(
-            'proto/enums.proto',
-            (content) => {
-              const enumMatch = content.match(/enum\s+GpioAction\s*\{([\s\S]*?)\}/);
-              if (!enumMatch) throw new Error('❌ enum GpioAction in proto/enums.proto nicht gefunden!');
-
-              const enumBlock = enumMatch[0];
-              const enumBody = enumMatch[1];
-
-              if (enumBody.includes('BUTTON_PRESS_MACRO_7')) {
-                const m7 = enumBody.match(/BUTTON_PRESS_MACRO_7\s*=\s*(\d+)/);
-                const m8 = enumBody.match(/BUTTON_PRESS_MACRO_8\s*=\s*(\d+)/);
-                macro7Id = Number(m7[1]);
-                macro8Id = Number(m8[1]);
-                return content;
-              }
-
-              const ids = [...enumBody.matchAll(/=\s*(\d+)\s*(?:\[[^\]]*\]\s*)?;/g)].map((m) =>
-                Number(m[1])
-              );
-              const maxId = Math.max(...ids);
-              macro7Id = maxId + 1;
-              macro8Id = maxId + 2;
-
-              console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
-
-              const updatedBlock = enumBlock.replace(
-                /\}\s*\$/,
-                `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
-              );
-
-              return content.replace(enumBlock, updatedBlock);
-            },
-            true
-          );
-
-          // 4. src/addons/input_macro.cpp sicher erweitern (Fallthrough + eigene Case-Blöcke ohne default-Duplizierung)
-          patchFile(
-            'src/addons/input_macro.cpp',
-            (content) => {
-              if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
-
-              let updated = content.replace(
-                /(\bGpioAction\s+\w+\s*)\[\s*6\s*\]/g,
-                (_, p1) => `${p1}[${TARGET_MACROS}]`
-              );
-
-              // 4a) Fallthrough-Listen (z.B. in InputMacro::available(): MACRO_5:\n MACRO_6:\n return true;)
-              updated = updated.replace(
-                /(case\s+GpioAction::BUTTON_PRESS_MACRO_5\s*:[ \t]*\r?\n([ \t]*)case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
-                (_, full, indent) =>
-                  `${full}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:`
-              );
-
-              // 4b) Eigenständige case-Blöcke für MACRO_6 (stoppt strikt vor case / default / })
-              const dedicatedCaseRegex =
-                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:(?!\s*case\s+GpioAction::BUTTON_PRESS_MACRO_7)(?:(?!\b(?:case|default)\b|\})[\s\S])*)/g;
-
-              updated = updated.replace(dedicatedCaseRegex, (rawBlock) => {
-                const trailingWsMatch = rawBlock.match(/(\s*)\$/);
-                const trailingWs = trailingWsMatch ? trailingWsMatch[1] : '\n';
-                const block = rawBlock.slice(0, rawBlock.length - trailingWs.length);
-
-                const afterColon = block
-                  .replace(/^[ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:/, '')
-                  .trim();
-
-                if (!afterColon) {
-                  const indent = (block.match(/^([ \t]*)/) || ['', ''])[1];
-                  return `${block}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:${trailingWs}`;
-                }
-
-                const block7 = block
-                  .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
-                  .replace(/[5]/g, '[6]')
-                  .replace(/\(\s*5\s*\)/g, '(6)')
-                  .replace(/=\s*5\s*;/g, '= 6
