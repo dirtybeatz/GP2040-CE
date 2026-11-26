@@ -6,11 +6,11 @@ on:
       board_config:
         description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev4, FlatboxRev5, FlatboxUltra, Haute42, Pico)'
         required: true
-        default: 'FlatboxRev4'
+        default: 
       max_macro_inputs:
         description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (z.B. 20, 22 oder 25; leer = Standard)'
         required: false
-        default: '20'
+        default: 
 
 jobs:
   build:
@@ -45,15 +45,15 @@ jobs:
 
       - name: Verify Board Config
         env:
-          BOARD_CONFIG: \${{ inputs.board_config }}
+          BOARD_CONFIG: \{{ inputs.board_config }}
         run: |
-          if [ ! -d "configs/\$BOARD_CONFIG" ]; then
-            echo "❌ Board-Config 'configs/\$BOARD_CONFIG' nicht gefunden!"
+          if [ ! -d "configs/\BOARD_CONFIG" ]; then
+            echo "❌ Board-Config 'configs/\BOARD_CONFIG' nicht gefunden!"
             echo "Verfügbare Boards in configs/:"
             ls -1 configs/
             exit 1
           fi
-          echo "✅ Board-Config gefunden: configs/\$BOARD_CONFIG"
+          echo "✅ Board-Config gefunden: configs/\BOARD_CONFIG"
 
       - name: Apply 8-Macro Patch (Firmware + Web UI)
         env:
