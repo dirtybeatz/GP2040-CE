@@ -48,214 +48,249 @@ jobs:
       - name: Apply 8-Macro Patch (Firmware + Web UI)
         run: |
           cat << 'EOF' > patch_8_macros.mjs
-          import fs from 'fs';
-          import path from 'path';
+import fs from 'fs';
+import path from 'path';
 
-          const TARGET_MACROS = 8;
+const TARGET_MACROS = 8;
 
-          function walk(dir, files = []) {
-            if (!fs.existsSync(dir)) return files;
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, entry.name);
-              if (entry.isDirectory()) {
-                if (['node_modules', 'dist', 'build', '.git'].includes(entry.name)) continue;
-                walk(full, files);
-              } else {
-                files.push(full);
-              }
-            }
-            return files;
-          }
+function walk(dir, files = []) {
+  if (!fs.existsSync(dir)) return files;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (['node_modules', 'dist', 'build', '.git'].includes(entry.name)) continue;
+      walk(full, files);
+    } else {
+      files.push(full);
+    }
+  }
+  return files;
+}
 
-          function patchFile(filePath, replacer, required = false) {
-            if (!fs.existsSync(filePath)) {
-              if (required) throw new Error(`❌ Pflichtdatei nicht gefunden: ${filePath}`);
-              console.warn(`⚠️ Übersprungen (nicht gefunden): ${filePath}`);
-              return false;
-            }
-            const original = fs.readFileSync(filePath, 'utf8');
-            const updated = replacer(original);
-            if (original !== updated) {
-              fs.writeFileSync(filePath, updated, 'utf8');
-              console.log(`✅ Gepatcht: ${filePath}`);
-              return true;
-            }
-            if (required) {
-              throw new Error(`❌ Patch hat in Pflichtdatei nicht gegriffen: ${filePath}`);
-            }
-            return false;
-          }
+function patchFile(filePath, replacer, required = false) {
+  if (!fs.existsSync(filePath)) {
+    if (required) throw new Error(`❌ Pflichtdatei nicht gefunden: ${filePath}`);
+    console.warn(`⚠️ Übersprungen (nicht gefunden): ${filePath}`);
+    return false;
+  }
+  const original = fs.readFileSync(filePath, 'utf8');
+  const updated = replacer(original);
+  if (original !== updated) {
+    fs.writeFileSync(filePath, updated, 'utf8');
+    console.log(`✅ Gepatcht: ${filePath}`);
+    return true;
+  }
+  if (required) {
+    throw new Error(`❌ Patch hat in Pflichtdatei nicht gegriffen: ${filePath}`);
+  }
+  return false;
+}
 
-          patchFile(
-            'headers/addons/input_macro.h',
-            (content) =>
-              content.replace(/#define\s+MAX_MACRO_LIMIT\s+\d+/, `#define MAX_MACRO_LIMIT ${TARGET_MACROS}`),
-            true
-          );
+// 1. C++ Makro-Limit
+patchFile(
+  'headers/addons/input_macro.h',
+  (content) =>
+    content.replace(/#define\s+MAX_MACRO_LIMIT\s+\d+/, `#define MAX_MACRO_LIMIT ${TARGET_MACROS}`),
+  true
+);
 
-          patchFile(
-            'proto/config.options',
-            (content) =>
-              content.replace(/(MacroOptions\.macroList\s+max_count:)\d+/, `$1${TARGET_MACROS}`),
-            true
-          );
+// 2. Protobuf Nanopb max_count (config.options ODER inline in config.proto)
+let patchedProtoLimit = false;
 
-          let macro7Id = null;
-          let macro8Id = null;
+if (fs.existsSync('proto/config.options')) {
+  patchedProtoLimit = patchFile(
+    'proto/config.options',
+    (content) =>
+      content.replace(
+        /(MacroOptions\.macroList\s+max_count\s*:\s*)\d+/,
+        (_, p1) => `${p1}${TARGET_MACROS}`
+      ),
+    false
+  );
+}
 
-          patchFile(
-            'proto/enums.proto',
-            (content) => {
-              const enumMatch = content.match(/enum\s+GpioAction\s*\{([\s\S]*?)\}/);
-              if (!enumMatch) throw new Error('❌ enum GpioAction in proto/enums.proto nicht gefunden!');
+if (!patchedProtoLimit && fs.existsSync('proto/config.proto')) {
+  patchedProtoLimit = patchFile(
+    'proto/config.proto',
+    (content) =>
+      content.replace(
+        /(macroList\s*=\s*\d+\s*\[[^\]]*max_count\s*=\s*)\d+/,
+        (_, p1) => `${p1}${TARGET_MACROS}`
+      ),
+    false
+  );
+}
 
-              const enumBlock = enumMatch[0];
-              const enumBody = enumMatch[1];
+if (!patchedProtoLimit) {
+  throw new Error(
+    '❌ Konnte macroList max_count weder in proto/config.options noch in proto/config.proto patchen!'
+  );
+}
 
-              if (enumBody.includes('BUTTON_PRESS_MACRO_7')) {
-                const m7 = enumBody.match(/BUTTON_PRESS_MACRO_7\s*=\s*(\d+)/);
-                const m8 = enumBody.match(/BUTTON_PRESS_MACRO_8\s*=\s*(\d+)/);
-                macro7Id = Number(m7[1]);
-                macro8Id = Number(m8[1]);
-                return content;
-              }
+// 3. GpioAction Enum erweitern
+let macro7Id = null;
+let macro8Id = null;
 
-              const ids = [...enumBody.matchAll(/=\s*(\d+)\s*;/g)].map((m) => Number(m[1]));
-              const maxId = Math.max(...ids);
-              macro7Id = maxId + 1;
-              macro8Id = maxId + 2;
+patchFile(
+  'proto/enums.proto',
+  (content) => {
+    const enumMatch = content.match(/enum\s+GpioAction\s*\{([\s\S]*?)\}/);
+    if (!enumMatch) throw new Error('❌ enum GpioAction in proto/enums.proto nicht gefunden!');
 
-              console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
+    const enumBlock = enumMatch[0];
+    const enumBody = enumMatch[1];
 
-              const updatedBlock = enumBlock.replace(
-                /\}\s*$/,
-                `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
-              );
+    if (enumBody.includes('BUTTON_PRESS_MACRO_7')) {
+      const m7 = enumBody.match(/BUTTON_PRESS_MACRO_7\s*=\s*(\d+)/);
+      const m8 = enumBody.match(/BUTTON_PRESS_MACRO_8\s*=\s*(\d+)/);
+      macro7Id = Number(m7[1]);
+      macro8Id = Number(m8[1]);
+      return content;
+    }
 
-              return content.replace(enumBlock, updatedBlock);
-            },
-            true
-          );
+    const ids = [...enumBody.matchAll(/=\s*(\d+)\s*(?:\[[^\]]*\]\s*)?;/g)].map((m) => Number(m[1]));
+    const maxId = Math.max(...ids);
+    macro7Id = maxId + 1;
+    macro8Id = maxId + 2;
 
-          patchFile(
-            'src/addons/input_macro.cpp',
-            (content) => {
-              if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
+    console.log(`ℹ️ Ermittelte GpioAction IDs -> MACRO_7=${macro7Id}, MACRO_8=${macro8Id}`);
 
-              let updated = content;
-              const caseBlockRegex =
-                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
+    const updatedBlock = enumBlock.replace(
+      /\}\s*$/,
+      `    BUTTON_PRESS_MACRO_7 = ${macro7Id};\n    BUTTON_PRESS_MACRO_8 = ${macro8Id};\n}`
+    );
 
-              if (caseBlockRegex.test(updated)) {
-                updated = updated.replace(caseBlockRegex, (block) => {
-                  const block7 = block
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
-                    .replace(/\[5\]/g, '[6]')
-                    .replace(/\(\s*5\s*\)/g, '(6)')
-                    .replace(/=\s*5\s*;/g, '= 6;');
-                  const block8 = block
-                    .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
-                    .replace(/\[5\]/g, '[7]')
-                    .replace(/\(\s*5\s*\)/g, '(7)')
-                    .replace(/=\s*5\s*;/g, '= 7;');
-                  return `${block}\n${block7}\n${block8}`;
-                });
-              } else {
-                updated = updated.replace(
-                  /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
-                  '$1,\n        GpioAction::BUTTON_PRESS_MACRO_7,\n        GpioAction::BUTTON_PRESS_MACRO_8'
-                );
-              }
+    return content.replace(enumBlock, updatedBlock);
+  },
+  true
+);
 
-              return updated;
-            },
-            true
-          );
+// 4. src/addons/input_macro.cpp erweitern
+patchFile(
+  'src/addons/input_macro.cpp',
+  (content) => {
+    if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
 
-          for (const file of [...walk('src'), ...walk('headers')]) {
-            if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
-            const text = fs.readFileSync(file, 'utf8');
-            if (text.includes('BUTTON_PRESS_MACRO_6')) {
-              console.log(`🔎 Weiterer Fund in C++ (${file}) – wird automatisch erweitert...`);
-              patchFile(file, (content) => {
-                if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
-                return content.replace(
-                  /(case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
-                  '$1\n        case GpioAction::BUTTON_PRESS_MACRO_7:\n        case GpioAction::BUTTON_PRESS_MACRO_8:'
-                );
-              });
-            }
-          }
+    let updated = content;
+    const caseBlockRegex =
+      /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)/g;
 
-          const webFiles = walk('www/src');
-          let patchedMacroUi = false;
+    if (caseBlockRegex.test(updated)) {
+      updated = updated.replace(caseBlockRegex, (block) => {
+        const block7 = block
+          .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_7')
+          .replace(/\[5\]/g, '[6]')
+          .replace(/\(\s*5\s*\)/g, '(6)')
+          .replace(/=\s*5\s*;/g, '= 6;')
+          .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}6`)
+          .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}6;`);
+        const block8 = block
+          .replace(/BUTTON_PRESS_MACRO_6/g, 'BUTTON_PRESS_MACRO_8')
+          .replace(/\[5\]/g, '[7]')
+          .replace(/\(\s*5\s*\)/g, '(7)')
+          .replace(/=\s*5\s*;/g, '= 7;')
+          .replace(/(<<\s*)5\b/g, (_, p1) => `${p1}7`)
+          .replace(/(return\s+)5\s*;/g, (_, p1) => `${p1}7;`);
+        return `${block}\n${block7}\n${block8}`;
+      });
+    } else {
+      updated = updated.replace(
+        /(GpioAction::BUTTON_PRESS_MACRO_6)/g,
+        '$1,\n        GpioAction::BUTTON_PRESS_MACRO_7,\n        GpioAction::BUTTON_PRESS_MACRO_8'
+      );
+    }
 
-          for (const file of webFiles) {
-            if (!/\.(ts|tsx|js|jsx)$/.test(file)) continue;
-            const original = fs.readFileSync(file, 'utf8');
-            let updated = original;
+    return updated;
+  },
+  true
+);
 
-            if (
-              file.includes('InputMacro') ||
-              /MAX_MACRO_LIMIT/.test(updated) ||
-              /macroList\.length\s*[<>]=?\s*6/.test(updated)
-            ) {
-              updated = updated
-                .replace(/(MAX_MACRO_LIMIT\s*=\s*)\d+/g, `$1${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*<\s*)6\b/g, `$1${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*>=\s*)6\b/g, `$1${TARGET_MACROS}`)
-                .replace(/(macroList\.length\s*===?\s*)6\b/g, `$1${TARGET_MACROS}`);
-              if (updated !== original) patchedMacroUi = true;
-            }
+// 5. Weitere C++-Fundstellen automatisch mitziehen
+for (const file of [...walk('src'), ...walk('headers')]) {
+  if (file.endsWith('input_macro.cpp') || file.endsWith('input_macro.h')) continue;
+  const text = fs.readFileSync(file, 'utf8');
+  if (text.includes('BUTTON_PRESS_MACRO_6')) {
+    console.log(`🔎 Weiterer Fund in C++ (${file}) – wird automatisch erweitert...`);
+    patchFile(file, (content) => {
+      if (content.includes('BUTTON_PRESS_MACRO_7')) return content;
+      return content.replace(
+        /(case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
+        '$1\n        case GpioAction::BUTTON_PRESS_MACRO_7:\n        case GpioAction::BUTTON_PRESS_MACRO_8:'
+      );
+    });
+  }
+}
 
-            if (
-              updated.includes('BUTTON_PRESS_MACRO_6') &&
-              !updated.includes('BUTTON_PRESS_MACRO_7')
-            ) {
-              if (/BUTTON_PRESS_MACRO_6\s*:\s*\d+/.test(updated)) {
-                updated = updated.replace(
-                  /([ \t]*BUTTON_PRESS_MACRO_6\s*:\s*\d+,?)/g,
-                  `$1\n\tBUTTON_PRESS_MACRO_7: ${macro7Id},\n\tBUTTON_PRESS_MACRO_8: ${macro8Id},`
-                );
-              }
+// 6. Web-UI patchen (inkl. .json Locales und sauberer Komma-Behandlung)
+const webFiles = walk('www/src');
+let patchedMacroUi = false;
 
-              if (/BUTTON_PRESS_MACRO_6\s*:\s*['"][^'"]+['"]/.test(updated)) {
-                updated = updated.replace(
-                  /([ \t]*)(['"]?BUTTON_PRESS_MACRO_6['"]?\s*:\s*(['"])([^'"]*?)6([^'"]*?)\3,?)/g,
-                  (_, indent, full, quote, prefix, suffix) =>
-                    `${indent}${full}\n${indent}BUTTON_PRESS_MACRO_7: ${quote}${prefix}7${suffix}${quote},\n${indent}BUTTON_PRESS_MACRO_8: ${quote}${prefix}8${suffix}${quote},`
-                );
-              }
+for (const file of webFiles) {
+  if (!/\.(ts|tsx|js|jsx|json)$/.test(file)) continue;
+  const original = fs.readFileSync(file, 'utf8');
+  let updated = original;
 
-              if (
-                /BUTTON_PRESS_MACRO_6(?![\w'":])/.test(updated) &&
-                !updated.includes('BUTTON_PRESS_MACRO_7')
-              ) {
-                updated = updated.replace(
-                  /([ \t]*)([\w.]*BUTTON_PRESS_MACRO_6)(,?)/g,
-                  (_, indent, ref, comma) => {
-                    const ref7 = ref.replace('MACRO_6', 'MACRO_7');
-                    const ref8 = ref.replace('MACRO_6', 'MACRO_8');
-                    const c = comma || ',';
-                    return `${indent}${ref}${c}\n${indent}${ref7}${c}\n${indent}${ref8}${comma}`;
-                  }
-                );
-              }
-            }
+  if (
+    file.includes('InputMacro') ||
+    /MAX_MACRO_LIMIT/.test(updated) ||
+    /macroList\.length\s*[<>]=?\s*6/.test(updated)
+  ) {
+    updated = updated
+      .replace(/(MAX_MACRO_LIMIT\s*=\s*)\d+/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+      .replace(/(macroList\.length\s*<\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+      .replace(/(macroList\.length\s*>=\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`)
+      .replace(/(macroList\.length\s*===?\s*)6\b/g, (_, p1) => `${p1}${TARGET_MACROS}`);
+    if (updated !== original) patchedMacroUi = true;
+  }
 
-            if (updated !== original) {
-              fs.writeFileSync(file, updated, 'utf8');
-              console.log(`✅ Web-UI gepatcht: ${file}`);
-            }
-          }
+  if (
+    updated.includes('BUTTON_PRESS_MACRO_6') &&
+    !updated.includes('BUTTON_PRESS_MACRO_7')
+  ) {
+    if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*\d+/.test(updated)) {
+      updated = updated.replace(
+        /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*\d+)(,?)/g,
+        (_, indent, q, val, comma) =>
+          `${indent}${q}BUTTON_PRESS_MACRO_6${q}${val},\n${indent}${q}BUTTON_PRESS_MACRO_7${q}: ${macro7Id},\n${indent}${q}BUTTON_PRESS_MACRO_8${q}: ${macro8Id}${comma}`
+      );
+    }
 
-          if (!patchedMacroUi) {
-            throw new Error('❌ Macro-Limit in der Web-UI (www/src) wurde nicht gefunden!');
-          }
+    if (/BUTTON_PRESS_MACRO_6['"]?\s*:\s*['"][^'"]+['"]/.test(updated)) {
+      updated = updated.replace(
+        /([ \t]*)(['"]?)BUTTON_PRESS_MACRO_6\2(\s*:\s*)(['"])([^'"]*?)6([^'"]*?)\4(,?)/g,
+        (_, indent, kq, colon, vq, prefix, suffix, comma) =>
+          `${indent}${kq}BUTTON_PRESS_MACRO_6${kq}${colon}${vq}${prefix}6${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_7${kq}${colon}${vq}${prefix}7${suffix}${vq},\n${indent}${kq}BUTTON_PRESS_MACRO_8${kq}${colon}${vq}${prefix}8${suffix}${vq}${comma}`
+      );
+    }
 
-          console.log(`🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}) komplett eingepatcht.`);
-          EOF
-          node patch_8_macros.mjs
+    if (
+      /BUTTON_PRESS_MACRO_6(?![\w'":])/.test(updated) &&
+      !updated.includes('BUTTON_PRESS_MACRO_7')
+    ) {
+      updated = updated.replace(
+        /([ \t]*)([\w.]*BUTTON_PRESS_MACRO_6)(,?)/g,
+        (_, indent, ref, comma) => {
+          const ref7 = ref.replace('MACRO_6', 'MACRO_7');
+          const ref8 = ref.replace('MACRO_6', 'MACRO_8');
+          return `${indent}${ref},\n${indent}${ref7},\n${indent}${ref8}${comma}`;
+        }
+      );
+    }
+  }
+
+  if (updated !== original) {
+    fs.writeFileSync(file, updated, 'utf8');
+    console.log(`✅ Web-UI gepatcht: ${file}`);
+  }
+}
+
+if (!patchedMacroUi) {
+  throw new Error('❌ Macro-Limit in der Web-UI (www/src) wurde nicht gefunden!');
+}
+
+console.log(`🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}) komplett eingepatcht.`);
+EOF
+node patch_8_macros.mjs
 
       - name: Build Web UI
         working-directory: www
