@@ -1,23 +1,28 @@
-name: Build GP2040-CE (8 Macros)
+name: Build GP2040-CE (8 Macros All-in-One)
 
 on:
   workflow_dispatch:
     inputs:
       board_config:
-        description: 'Board-Ordnername aus configs/ (z.B. FlatboxRev4, FlatboxRev5, Haute42COSMOX, Pico)'
+        description: 'Board-Config Ordner in configs/'
         required: true
         default: 'FlatboxRev4'
       max_macro_inputs:
-        description: 'Optional: MAX_MACRO_INPUT_LIMIT überschreiben (z.B. 20, 22 oder 25; leer = Standard)'
-        required: false
-        default: '20'
+        description: 'Maximale Input-Zeilen pro Makro (z. B. 30)'
+        required: true
+        default: '30'
 
 jobs:
   build:
     runs-on: ubuntu-24.04
 
+    env:
+      BOARD_CONFIG: ${{ github.event.inputs.board_config || 'FlatboxRev4' }}
+      MAX_MACRO_INPUTS: ${{ github.event.inputs.max_macro_inputs || '30' }}
+      PICO_SDK_FETCH_FROM_GIT: 1
+
     steps:
-      - name: Checkout Repository (with Submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -25,9 +30,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      - name: Install Build Dependencies & ARM Toolchain
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -43,9 +48,7 @@ jobs:
             python3-protobuf
           pip3 install --break-system-packages protobuf grpcio-tools
 
-      - name: Verify Board Config
-        env:
-          BOARD_CONFIG: ${{ inputs.board_config }}
+      - name: Verify board config
         run: |
           if [ ! -d "configs/$BOARD_CONFIG" ]; then
             echo "❌ Board-Config 'configs/$BOARD_CONFIG' nicht gefunden!"
@@ -55,9 +58,7 @@ jobs:
           fi
           echo "✅ Board-Config gefunden: configs/$BOARD_CONFIG"
 
-      - name: Apply 8-Macro Patch (Firmware + Web UI)
-        env:
-          MAX_MACRO_INPUTS: ${{ inputs.max_macro_inputs }}
+      - name: Patch 8 macro slots (C++, Protobuf & Web-UI)
         run: |
           cat << 'EOF' > patch_8_macros.mjs
           import fs from 'fs';
@@ -209,7 +210,7 @@ jobs:
             true
           );
 
-          // 4. src/addons/input_macro.cpp sicher erweitern (ohne default-Duplizierung)
+          // 4. src/addons/input_macro.cpp sicher erweitern (inkl. Fix für Mask_t{1})
           patchFile(
             'src/addons/input_macro.cpp',
             (content) => {
@@ -227,9 +228,9 @@ jobs:
                   `${full}\n${indent}case GpioAction::BUTTON_PRESS_MACRO_7:\n${indent}case GpioAction::BUTTON_PRESS_MACRO_8:`
               );
 
-              // 4b) Eigenständige case-Blöcke für MACRO_6 (stoppt strikt vor case / default / })
+              // 4b) Eigenständige case-Blöcke für MACRO_6 (stoppt vor case / default / Zeilenanfang-})
               const dedicatedCaseRegex =
-                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:(?!\s*case\s+GpioAction::BUTTON_PRESS_MACRO_7)(?:(?!\b(?:case|default)\b|\})[\s\S])*)/g;
+                /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:(?!\s*case\s+GpioAction::BUTTON_PRESS_MACRO_7)(?:(?!\b(?:case|default)\b|\r?\n[ \t]*\})[\s\S])*)/g;
 
               updated = updated.replace(dedicatedCaseRegex, (rawBlock) => {
                 const trailingWsMatch = rawBlock.match(/(\s*)$/);
@@ -295,13 +296,11 @@ jobs:
               }
               let out = content;
 
-              // a) Feste GpioAction-Arrays von [6] auf [8] hochsetzen
               out = out.replace(
                 /(\bGpioAction\s+\w+\s*)\[\s*6\s*\]/g,
                 (_, p1) => `${p1}[${TARGET_MACROS}]`
               );
 
-              // b) switch-case
               out = out.replace(
                 /([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:)/g,
                 (match) => {
@@ -310,7 +309,6 @@ jobs:
                 }
               );
 
-              // c) Map-/Struct-Einträge wie { GpioAction::BUTTON_PRESS_MACRO_6, "M6" },
               out = out.replace(
                 /([ \t]*\{\s*GpioAction::BUTTON_PRESS_MACRO_6\s*,\s*([^}\n]*?)\s*\})(,?)/g,
                 (_, entry, secondArg, comma) => {
@@ -324,13 +322,11 @@ jobs:
                 }
               );
 
-              // d) Bereichsprüfungen wie action <= GpioAction::BUTTON_PRESS_MACRO_6
               out = out.replace(
                 /(<=\s*GpioAction::BUTTON_PRESS_MACRO_)6\b/g,
                 (_, p1) => `${p1}${TARGET_MACROS}`
               );
 
-              // e) Listen-/Array-Einträge
               if (!out.includes('BUTTON_PRESS_MACRO_7') && !out.includes('BUTTON_PRESS_MACRO_8')) {
                 out = out.replace(
                   /([ \t]*)(GpioAction::BUTTON_PRESS_MACRO_6)(,?)/g,
@@ -455,17 +451,14 @@ jobs:
           echo "--- Kontrollausgabe input_macro.cpp ---"
           grep -n -C 3 "BUTTON_PRESS_MACRO_6\|BUTTON_PRESS_MACRO_7\|BUTTON_PRESS_MACRO_8" src/addons/input_macro.cpp || true
 
-      - name: Configure & Build Firmware (inkl. Web UI)
-        env:
-          BOARD_CONFIG: ${{ inputs.board_config }}
-          PICO_SDK_FETCH_FROM_GIT: '1'
+      - name: Build firmware & Web-UI
         run: |
           cmake -B build -G Ninja -DGP2040_BOARDCONFIG="$BOARD_CONFIG"
           cmake --build build --parallel
 
-      - name: Upload Firmware Artifact (.uf2)
+      - name: Upload UF2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GP2040-CE-${{ inputs.board_config }}-8Macros
+          name: GP2040-CE-${{ env.BOARD_CONFIG }}-8Macros-${{ env.MAX_MACRO_INPUTS }}Inputs
           path: build/*.uf2
           if-no-files-found: error
