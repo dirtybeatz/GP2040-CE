@@ -1,4 +1,4 @@
-name: GP2040-CE All-in-One v6 (8 Web-Slots + Hardcoded Banks + OLED Anzeige MK11)
+name: GP2040-CE All-in-One v7 (8 Web-Slots + Normal-Macro Fix + Hardcoded Banks + OLED MK11)
 
 on:
   workflow_dispatch:
@@ -70,17 +70,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-protobuf protobuf-compiler
 
-      - name: 8 Web-Slots + Hardcoded Banks + OLED-Anzeige patchen
+      - name: 8 Web-Slots + Normal-Macro Fix (input_macro & HTTP/JSON) + Hardcoded Banks + OLED patchen
         shell: python3 {0}
         run: |
           import os
           import re
           import sys
 
-          TARGET_SLOTS  = int(os.environ.get("WEB_MACRO_SLOTS", "8"))
-          TARGET_INPUTS = int(os.environ.get("WEB_MACRO_INPUTS", "24"))
-          MACRO_7_ID    = 143
-          MACRO_8_ID    = 144
+          TARGET_SLOTS     = int(os.environ.get("WEB_MACRO_SLOTS", "8"))
+          TARGET_INPUTS    = int(os.environ.get("WEB_MACRO_INPUTS", "24"))
+          TARGET_JSON_BUF  = 32768
+          MACRO_7_ID       = 143
+          MACRO_8_ID       = 144
 
           def read_text(path):
               with open(path, "r", encoding="utf-8") as f:
@@ -173,7 +174,10 @@ jobs:
               return -1
 
           def patch_macro_enum_cpp(txt, fp):
-              """Ergaenzt BUTTON_PRESS_MACRO_7 (ID 143) und BUTTON_PRESS_MACRO_8 (ID 144) lokal-idempotent in C++."""
+              """
+              Ergaenzt BUTTON_PRESS_MACRO_7 (ID 143) und BUTTON_PRESS_MACRO_8 (ID 144) sicher in C++.
+              WICHTIG: Verhindert Out-of-Bounds-Zugriffe (143 - 34 = 109) bei Fallthrough-Switches!
+              """
               if "BUTTON_PRESS_MACRO_6" not in txt:
                   return txt, False
 
@@ -216,15 +220,35 @@ jobs:
                   )
               txt = arr_unsized_pat.sub(repl_arr_unsized, txt)
 
-              # 2a. Einzelner switch-case mit Index 5 und break;/return
-              case_idx_pat = re.compile(
-                  r'([ \t]*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*:([\s\S]*?(?:break;|return\b[^;]*;)))(\s*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_7\b)?'
+              # 2a. Switch-Case Block mit explizitem Index 5 ODER mit Subtraktion (- BUTTON_PRESS_MACRO_1)!
+              #     Verhindert, dass ID 143/144 in eine Subtraktion (143 - 34 = 109) hineinfallen!
+              case_block_pat = re.compile(
+                  r'([ \t]*case\s+((?:\(\s*int\s*\)\s*)?(?:GpioAction::)?)BUTTON_PRESS_MACRO_6\s*:([\s\S]*?(?:break;|return\b[^;]*;)))(\s*case\s+(?:\(\s*int\s*\)\s*)?(?:GpioAction::)?BUTTON_PRESS_MACRO_7\b)?'
               )
-              def repl_case_indexed(m):
+              def repl_case_block(m):
                   nonlocal any_changed
-                  block, body, already7 = m.groups()
+                  block, pref, body, already7 = m.groups()
                   if already7:
                       return m.group(0)
+                  pref = pref or ""
+
+                  # Fall A: Body enthaelt Subtraktion `... - (optional cast) BUTTON_PRESS_MACRO_1`
+                  sub_pat = re.compile(
+                      r'[A-Za-z0-9_.\->]+\s*-\s*(?:static_cast<[^>]+>\s*\(\s*|\(\s*int\s*\)\s*)?(?:GpioAction::)?BUTTON_PRESS_MACRO_1\s*\)?'
+                  )
+                  if sub_pat.search(body):
+                      indent_m = re.match(r'^([ \t]*)', block)
+                      indent = indent_m.group(1) if indent_m else ""
+                      body7 = sub_pat.sub('6', body)
+                      body8 = sub_pat.sub('7', body)
+                      any_changed = True
+                      return (
+                          block + "\n" +
+                          f"{indent}case {pref}BUTTON_PRESS_MACRO_7:{body7}\n" +
+                          f"{indent}case {pref}BUTTON_PRESS_MACRO_8:{body8}"
+                      )
+
+                  # Fall B: Body enthaelt expliziten Index 5 (z. B. macroPinMasks[5] |= 1 << pin; break;)
                   if re.search(r'\b5\b', body):
                       b7 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
                       b7 = re.sub(r'\b5\b', '6', b7)
@@ -232,17 +256,19 @@ jobs:
                       b8 = re.sub(r'\b5\b', '7', b8)
                       any_changed = True
                       return block + "\n" + b7 + "\n" + b8
-                  return m.group(0)
-              txt = case_idx_pat.sub(repl_case_indexed, txt)
 
-              # 2b. Fallthrough switch-case
+                  return m.group(0)
+
+              txt = case_block_pat.sub(repl_case_block, txt)
+
+              # 2b. Reiner Fallthrough-Switch OHNE Subtraktion (z. B. case MACRO_6: return true;)
               lines = txt.splitlines()
               out_lines = []
               for idx, ln in enumerate(lines):
-                  m_ft = re.match(r'^([ \t]*)case\s+(GpioAction::)?BUTTON_PRESS_MACRO_6\s*:\s*$', ln)
+                  m_ft = re.match(r'^([ \t]*)case\s+((?:\(\s*int\s*\)\s*)?(?:GpioAction::)?)BUTTON_PRESS_MACRO_6\s*:\s*$', ln)
                   if m_ft:
-                      lookahead = "\n".join(lines[idx + 1 : idx + 6])
-                      if "BUTTON_PRESS_MACRO_7" not in lookahead:
+                      lookahead = "\n".join(lines[idx + 1 : idx + 8])
+                      if "BUTTON_PRESS_MACRO_7" not in lookahead and "BUTTON_PRESS_MACRO_1" not in lookahead:
                           indent, pref = m_ft.group(1), (m_ft.group(2) or "")
                           out_lines.append(ln)
                           out_lines.append(f"{indent}case {pref}BUTTON_PRESS_MACRO_7:")
@@ -273,7 +299,7 @@ jobs:
                   )
               txt = range_pat.sub(repl_range, txt)
 
-              # 3b. Inline Range-Ausdruck
+              # 3b. Inline Range-Ausdruck (z. B. return (a >= MACRO_1 && a <= MACRO_6);)
               inline_range_pat = re.compile(
                   r'(\b([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\2\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\b)(\s*\|\|\s*\2\s*==\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_7)?'
               )
@@ -308,7 +334,7 @@ jobs:
               txt = elif_pat.sub(repl_elif, txt)
 
               if any_changed:
-                  print(f"[OK] {fp}: MACRO_7 (143) & MACRO_8 (144) ergaenzt.")
+                  print(f"[OK] {fp}: MACRO_7 (143) & MACRO_8 (144) sicher ergaenzt.")
               return txt, any_changed
 
           # ============================================================================
@@ -387,7 +413,7 @@ jobs:
               sys.exit(1)
 
           # ============================================================================
-          # TEIL B: C++ FIRMWARE REPO-WEIT PATCHEN (headers/ & src/)
+          # TEIL B: C++ FIRMWARE + INPUT_MACRO + WEBCONFIG HTTP/JSON-PUFFER PATCHEN
           # ============================================================================
           print("=== [B] Patche C++ Firmware (headers/ & src/) ===")
 
@@ -402,6 +428,7 @@ jobs:
                   txt = read_text(fp)
                   orig = txt
 
+                  # 1. MAX_MACRO_LIMIT & MAX_MACRO_INPUT_LIMIT
                   for pat in [
                       r'(#define\s+MAX_MACRO_LIMIT\s+)\d+',
                       r'((?:static\s+)?(?:constexpr|const)\s+[\w:]+\s+MAX_MACRO_LIMIT\s*=\s*)\d+',
@@ -416,9 +443,12 @@ jobs:
                       txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
                       cpp_inputs_hits += n
 
+                  # 2. Hardcodiertes macroList_count = 6 / macroPinMasks[6] abfangen
                   txt, n_cnt = re.subn(r'(macroList_count\s*=\s*)6\b', rf'\g<1>{TARGET_SLOTS}', txt)
                   cpp_slots_hits += n_cnt
+                  txt, _ = re.subn(r'(\b(?:uint32_t|int|unsigned\s+int|Pin_t)\s+macroPinMasks\s*\[\s*)6(\s*\])', r'\g<1>MAX_MACRO_LIMIT\g<2>', txt)
 
+                  # 3. Arithmetische Pin-Suche (BUTTON_PRESS_MACRO_1 + i) fuer ID 143/144 sichern
                   if "BUTTON_PRESS_MACRO_1" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
                       arith_pat = re.compile(r'((?:GpioAction::)?BUTTON_PRESS_MACRO_1)\s*\+\s*(\w+)')
                       if arith_pat.search(txt):
@@ -430,6 +460,7 @@ jobs:
                           cpp_enum_hits += 1
                           print(f"[OK] {fp}: BUTTON_PRESS_MACRO_1 + i fuer ID 143/144 abgesichert.")
 
+                  # 4. BUTTON_PRESS_MACRO_6 -> _7 & _8 (mit Out-of-Bounds-Schutz!)
                   txt, enum_changed = patch_macro_enum_cpp(txt, fp)
                   if enum_changed:
                       cpp_enum_hits += 1
@@ -437,9 +468,108 @@ jobs:
                   if txt != orig:
                       write_text(fp, txt)
                       print(f"[OK] C++ gepatcht: {fp}")
-                      for ln_no, ln in enumerate(txt.splitlines(), 1):
-                          if "BUTTON_PRESS_MACRO_7" in ln or "MAX_MACRO_" in ln:
-                              print(f"    L{ln_no}: {ln.strip()}")
+
+          # B2. KRITISCHER FIX FUER NORMALE MAKROS:
+          #     1) BoardConfig.h: MACRO_ENABLED = 1 sicherstellen!
+          target_board = os.environ.get("TARGET_BOARD", "")
+          board_cfg_h = os.path.join("configs", target_board, "BoardConfig.h")
+          if target_board and os.path.isfile(board_cfg_h):
+              btxt = read_text(board_cfg_h)
+              if re.search(r'#define\s+MACRO_ENABLED\s+0\b', btxt):
+                  btxt = re.sub(r'(#define\s+MACRO_ENABLED\s+)0\b', r'\g<1>1', btxt)
+                  write_text(board_cfg_h, btxt)
+                  print(f"[OK] {board_cfg_h}: MACRO_ENABLED von 0 auf 1 gesetzt!")
+              else:
+                  print(f"[INFO] {board_cfg_h}: MACRO_ENABLED nicht auf 0.")
+
+          #     2) src/addons/input_macro.cpp: Hardcoded-6-Schutz & Diagnose-Ausgabe
+          im_cpp = os.path.join("src", "addons", "input_macro.cpp")
+          if os.path.isfile(im_cpp):
+              im_txt = read_text(im_cpp)
+              im_orig = im_txt
+
+              im_txt, n_loop = re.subn(
+                  r'(for\s*\(\s*(?:int|uint8_t|size_t)\s+\w+\s*=\s*0\s*;\s*\w+\s*<\s*)6(\s*;)',
+                  r'\g<1>MAX_MACRO_LIMIT\g<2>',
+                  im_txt
+              )
+              if n_loop:
+                  print(f"[OK] {im_cpp}: {n_loop} Schleife(n) von < 6 auf < MAX_MACRO_LIMIT umgestellt.")
+
+              if im_txt != im_orig:
+                  write_text(im_cpp, im_txt)
+
+              print(f"--- [DIAGNOSE] {im_cpp} (available / reinit / MACRO-Zeilen) ---")
+              for ln_no, ln in enumerate(im_txt.splitlines(), 1):
+                  if any(k in ln for k in ("available(", "reinit(", "MACRO", "macroPinMasks", "macroList", "macroButtonMask", "enabled")):
+                      print(f"  L{ln_no:4d}: {ln}")
+
+          #     3) src/webconfig.cpp: HTTP-POST-Puffer & ArduinoJson DynamicJsonDocument auf >= 32768 Bytes erhoehen!
+          #        Verhindert, dass Backup-Restore oder Speichern von 8 Makros (~6.7 KB JSON -> ~20 KB DOM)
+          #        wegen DeserializationError::NoMemory still fehlschlaegt!
+          wc_cpp = os.path.join("src", "webconfig.cpp")
+          if os.path.isfile(wc_cpp):
+              wc_txt = read_text(wc_cpp)
+              wc_orig = wc_txt
+              buf_bumps = [0]
+
+              def bump_size(m):
+                  prefix, num_str, suffix = m.groups()
+                  val = int(num_str)
+                  if 1024 <= val < TARGET_JSON_BUF:
+                      buf_bumps[0] += 1
+                      return f"{prefix}{TARGET_JSON_BUF}{suffix}"
+                  return m.group(0)
+
+              wc_txt = re.sub(r'(\bDynamicJsonDocument\s+\w+\s*\(\s*)(\d+)(\s*\))', bump_size, wc_txt)
+              wc_txt = re.sub(r'(\b(?:LWIP_HTTPD_POST_MAX_PAYLOAD_LEN|HTTP_POST_MAX_LEN|MAX_POST_SIZE|JSON_BUFFER_SIZE)\s+)(\d+)(\b)', bump_size, wc_txt)
+
+              # In setMacroAddonOptions sicherstellen, dass macroOptions.enabled = true gesetzt wird,
+              # wenn Makros gespeichert/importiert werden (Backup-JSON enthaelt kein "enabled"-Feld!)
+              m_set_macro = re.search(r'std::string\s+setMacroAddonOptions\s*\([^)]*\)\s*\{', wc_txt)
+              if m_set_macro:
+                  s_open = wc_txt.find("{", m_set_macro.start())
+                  s_close = find_matching_brace(wc_txt, s_open)
+                  if s_close != -1:
+                      body = wc_txt[s_open:s_close]
+                      if "/* v7_force_macro_enabled */" not in body:
+                          m_opt_var = re.search(r'MacroOptions\s*&\s*(\w+)\s*=', body)
+                          if m_opt_var:
+                              vname = m_opt_var.group(1)
+                              ins = f"\n    /* v7_force_macro_enabled */ {vname}.enabled = true;"
+                              pos = s_open + m_opt_var.end()
+                              semi = wc_txt.find(";", pos)
+                              if semi != -1 and semi < s_close:
+                                  wc_txt = wc_txt[:semi + 1] + ins + wc_txt[semi + 1:]
+                                  print(f"[OK] {wc_cpp}: {vname}.enabled = true in setMacroAddonOptions() abgesichert.")
+
+              if wc_txt != wc_orig:
+                  write_text(wc_cpp, wc_txt)
+                  print(f"[OK] {wc_cpp} gepatcht (ArduinoJson/POST-Puffer erhoeht: {buf_bumps[0]} Stelle(n) auf {TARGET_JSON_BUF} Bytes).")
+
+              print(f"--- [DIAGNOSE] {wc_cpp} (JsonDocument & Macro-Handler) ---")
+              for ln_no, ln in enumerate(wc_txt.splitlines(), 1):
+                  if any(k in ln for k in ("JsonDocument", "setMacroAddonOptions", "getMacroAddonOptions", "macroList_count", "POST_MAX", "v7_force_macro_enabled")):
+                      print(f"  L{ln_no:4d}: {ln.strip()}")
+
+          #     4) headers/configs/webconfig.h / lwipopts.h auf POST-Puffer pruefen
+          for cfg_p in (
+              os.path.join("headers", "configs", "webconfig.h"),
+              os.path.join("lib", "lwip-port", "lwipopts.h"),
+          ):
+              if not os.path.isfile(cfg_p):
+                  continue
+              ct = read_text(cfg_p)
+              co = ct
+              def bump_hdr(m):
+                  val = int(m.group(2))
+                  if 1024 <= val < TARGET_JSON_BUF:
+                      return f"{m.group(1)}{TARGET_JSON_BUF}{m.group(3)}"
+                  return m.group(0)
+              ct = re.sub(r'(#define\s+(?:LWIP_HTTPD_POST_MAX_PAYLOAD_LEN|MAX_POST_BUFFER|HTTP_POST_BUFFER_SIZE|LWIP_HTTPD_MAX_REQUEST_URI_LEN)\s+)(\d+)(\b)', bump_hdr, ct)
+              if ct != co:
+                  write_text(cfg_p, ct)
+                  print(f"[OK] {cfg_p}: HTTP-POST-Puffer auf {TARGET_JSON_BUF} erhoeht.")
 
           print(f"[CHECK C++] MAX_MACRO_LIMIT hits={cpp_slots_hits}, MAX_MACRO_INPUT_LIMIT hits={cpp_inputs_hits}, MACRO_7/8 hits={cpp_enum_hits}")
 
@@ -546,23 +676,22 @@ jobs:
           // ============================================================================
           // KONFIGURATION: TRIGGER, OLED & VERHALTEN
           // ============================================================================
-          // Select (S1, GPIO 16 im kombinierten Backup) dient als:
+          // Select (S1) dient als:
           //   - Bank-Wechsel-Taste (On-Release: kurz antippen & loslassen)
           //   - Modifier fuer Combo 1 (Select + L1) und Combo 2 (Select + R1)
-          constexpr uint32_t BANK_SWITCH_MODIFIER   = GAMEPAD_MASK_S1; // Select / Share
-          constexpr uint32_t COMBO_1_BUTTON         = GAMEPAD_MASK_L1; // L1
-          constexpr uint32_t COMBO_2_BUTTON         = GAMEPAD_MASK_R1; // R1
+          constexpr uint32_t BANK_SWITCH_MODIFIER    = GAMEPAD_MASK_S1; // Select / Share
+          constexpr uint32_t COMBO_1_BUTTON          = GAMEPAD_MASK_L1; // L1
+          constexpr uint32_t COMBO_2_BUTTON          = GAMEPAD_MASK_R1; // R1
 
           // Verhindert auf PS4, dass Select (Share) das Share-Menue oeffnet.
-          // GP2040-CE System-Hotkeys (Start+Select+... und Fn+...) bleiben voll intakt,
-          // da gamepad->hotkey() VOR diesem Modul ausgefuehrt wird.
-          constexpr bool SUPPRESS_SELECT_OUTPUT     = true;
+          // GP2040-CE System-Hotkeys (Start+Select+... und Fn+...) bleiben voll intakt.
+          constexpr bool SUPPRESS_SELECT_OUTPUT      = true;
 
           // OLED-Anzeige (128x64, 21 Spalten x 8 Zeilen):
           // - Dauerhaftes kompaktes Badge unten rechts (Zeile 6, Spalte 13 -> frei ueber Input History!)
           // - Zusaetzliches 2-Sekunden-Banner (invertiert) auf Zeile 0 beim Bankwechsel
-          constexpr uint8_t  OLED_BADGE_COL         = 13;
-          constexpr uint8_t  OLED_BADGE_ROW         = 6;
+          constexpr uint8_t  OLED_BADGE_COL          = 13;
+          constexpr uint8_t  OLED_BADGE_ROW          = 6;
           constexpr uint32_t OLED_BANNER_DURATION_MS = 2000U;
 
           // ============================================================================
@@ -722,6 +851,7 @@ jobs:
 
           // ============================================================================
           // CORE-0: INPUT-VERARBEITUNG & PLAYBACK-ENGINE
+          // Greift niemals in normale Web-Config-Makros ein, solange Select nicht genutzt wird!
           // ============================================================================
           inline void process(Gamepad* gamepad) {
               if (gamepad == nullptr) {
@@ -784,15 +914,15 @@ jobs:
               s.prevL1     = l1Now;
               s.prevR1     = r1Now;
 
-              // 4. Trigger-Tasten unterdruecken, damit PS4 Share / L1 / R1 nicht ins Spiel leaken
-              if (SUPPRESS_SELECT_OUTPUT) {
-                  gamepad->state.buttons &= ~BANK_SWITCH_MODIFIER;
-              }
+              // 4. Trigger-Tasten nur dann unterdruecken, wenn Select gedrueckt ist
               if (selectNow) {
+                  if (SUPPRESS_SELECT_OUTPUT) {
+                      gamepad->state.buttons &= ~BANK_SWITCH_MODIFIER;
+                  }
                   gamepad->state.buttons &= ~(COMBO_1_BUTTON | COMBO_2_BUTTON);
               }
 
-              // 5. Aktives Makro zeitgenau abspielen (exklusiv, damit kein Fehleingang stoert)
+              // 5. Aktives Hardcoded-Makro zeitgenau abspielen (exklusiv)
               if (s.isPlaying && s.activeSeq != nullptr) {
                   uint64_t elapsedUs = nowUs - s.stepStartUs;
 
@@ -858,7 +988,6 @@ jobs:
               const uint32_t nowMs = static_cast<uint32_t>(time_us_64() / 1000ULL);
 
               // 1. Dauerhaftes kompaktes Badge (unten rechts: Zeile 6, Spalte 13 -> B1:SCORP / B2:SUB-Z / B3:LIU-K)
-              //    Leuchtet invertiert auf, waehrend eine Hardcoded-Combo abgefeuert wird.
               const uint8_t badgeInvert = s.isPlaying ? 1U : 0U;
               detail::drawTextCompat(renderer, OLED_BADGE_COL, OLED_BADGE_ROW, bank.oledBadge, badgeInvert, 0);
 
@@ -880,7 +1009,7 @@ jobs:
           write_text(header_path, header_code.lstrip("\n"))
           print(f"[OK] Geschrieben: {header_path}")
 
-          # D1. src/gp2040.cpp (Core 0 Input-Hook)
+          # D1. src/gp2040.cpp (Core 0 Input-Hook: NACH addons.ProcessAddons(), damit normale Makros 100% unberuehrt laufen!)
           gp2040_cpp = os.path.join("src", "gp2040.cpp")
           if not os.path.isfile(gp2040_cpp):
               print(f"[FEHLER] {gp2040_cpp} nicht gefunden!", file=sys.stderr)
@@ -899,21 +1028,24 @@ jobs:
               print("[INFO] #include in src/gp2040.cpp bereits vorhanden.")
 
           if "HardcodedMacros::process(" not in src:
-              m_hk = re.search(r'^([ \t]*)(\w+)->hotkey\(\);', src, flags=re.MULTILINE)
-              if m_hk:
-                  indent, var_name = m_hk.group(1), m_hk.group(2)
-                  inject = f"\n{indent}HardcodedMacros::process({var_name});"
-                  src = src[:m_hk.end()] + inject + src[m_hk.end():]
-                  print(f"[OK] HardcodedMacros::process({var_name}) nach hotkey() eingefuegt.")
+              m_addons = re.search(r'^([ \t]*)(\w+)\.ProcessAddons\s*\([^)]*\)\s*;', src, flags=re.MULTILINE)
+              if m_addons:
+                  indent = m_addons.group(1)
+                  ctx_before = src[max(0, m_addons.start() - 1200):m_addons.start()]
+                  m_gp = re.search(r'\b(\w+)->process\s*\(\s*\)\s*;', ctx_before)
+                  gp_var = m_gp.group(1) if m_gp else "gamepad"
+                  inject = f"\n{indent}HardcodedMacros::process({gp_var});"
+                  src = src[:m_addons.end()] + inject + src[m_addons.end():]
+                  print(f"[OK] HardcodedMacros::process({gp_var}) NACH ProcessAddons() eingefuegt (normale Makros komplett isoliert!).")
               else:
-                  m_proc = re.search(r'^([ \t]*)(\w+)->process\(\);', src, flags=re.MULTILINE)
+                  m_proc = re.search(r'^([ \t]*)(\w+)->process\s*\(\s*\)\s*;', src, flags=re.MULTILINE)
                   if not m_proc:
-                      print("[FEHLER] Konnte weder hotkey() noch process() in src/gp2040.cpp finden!", file=sys.stderr)
+                      print("[FEHLER] Konnte weder ProcessAddons() noch gamepad->process() in src/gp2040.cpp finden!", file=sys.stderr)
                       sys.exit(1)
                   indent, var_name = m_proc.group(1), m_proc.group(2)
-                  inject = f"{indent}HardcodedMacros::process({var_name});\n"
-                  src = src[:m_proc.start()] + inject + src[m_proc.start():]
-                  print(f"[OK] HardcodedMacros::process({var_name}) vor process() eingefuegt.")
+                  inject = f"\n{indent}HardcodedMacros::process({var_name});"
+                  src = src[:m_proc.end()] + inject + src[m_proc.end():]
+                  print(f"[OK] HardcodedMacros::process({var_name}) NACH {var_name}->process() eingefuegt.")
           else:
               print("[INFO] HardcodedMacros::process(...) bereits vorhanden.")
 
@@ -949,7 +1081,6 @@ jobs:
                   sys.exit(1)
 
               func_body = bls_src[open_idx:close_idx]
-              # Renderer-Aufruf im Body erkennen (Standard GP2040-CE: getRenderer())
               if "getRenderer()->" in func_body:
                   renderer_expr = "getRenderer()"
               elif "this->getRenderer()->" in func_body:
@@ -965,7 +1096,7 @@ jobs:
               print("[INFO] HardcodedMacros::drawOledOverlay(...) bereits vorhanden.")
 
           write_text(bls_cpp, bls_src)
-          print("=== Alle Patches (Protobuf + C++ + Web-UI + Hardcoded Banks + OLED) erfolgreich! ===")
+          print("=== Alle v7-Patches (Protobuf + C++ + HTTP/JSON-Puffer + input_macro Fix + Hardcoded Banks + OLED) erfolgreich! ===")
 
       - name: Node.js einrichten (fuer Web-Configurator-Build via CMake)
         if: ${{ inputs.build_webui }}
@@ -997,6 +1128,6 @@ jobs:
       - name: Firmware-Artifact hochladen
         uses: actions/upload-artifact@v4
         with:
-          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v6-OLED-HardcodedBanks-MK11
+          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v7-MacroFix-OLED-MK11
           path: release_out/*.uf2
           if-no-files-found: error
