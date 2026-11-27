@@ -1,4 +1,4 @@
-name: GP2040-CE All-in-One v3 (8 Web-Slots Fix + Hardcoded Banks MK11)
+name: GP2040-CE All-in-One v4 (8 Web-Slots + Inline Proto Fix + Hardcoded Banks MK11)
 
 on:
   workflow_dispatch:
@@ -6,14 +6,15 @@ on:
       board:
         description: "Board auswaehlen (oder unten custom_board fuer eigenen Ordnernamen nutzen)"
         required: true
-        default: "FlatboxRev4"
+        default: "Haute42COSMOX"
         type: choice
         options:
+          - Haute42COSMOX
+          - Haute42
           - FlatboxRev4
           - FlatboxRev5
           - FlatboxRev5Southpaw
           - FlatboxRev5RGB
-          - Haute42
           - Pico
           - PicoFightingBoard
           - RP2040AdvancedBreakoutBoard
@@ -69,7 +70,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-protobuf protobuf-compiler
 
-      - name: 8 Web-Slots (input_macro + Web-UI + Protobuf + ID 143/144) & Hardcoded Banks patchen
+      - name: 8 Web-Slots (config.proto + input_macro + Web-UI + ID 143/144) & Hardcoded Banks patchen
         shell: python3 {0}
         run: |
           import os
@@ -105,11 +106,13 @@ jobs:
               """Ergaenzt BUTTON_PRESS_MACRO_7 (ID 143) und BUTTON_PRESS_MACRO_8 (ID 144) in C++."""
               if "BUTTON_PRESS_MACRO_6" not in txt or "BUTTON_PRESS_MACRO_7" in txt:
                   return txt, False
-              changed = False
 
-              # 1. Einzelne switch-cases: case GpioAction::BUTTON_PRESS_MACRO_6: ... break;
-              def repl_case(m):
-                  nonlocal changed
+              orig = txt
+              any_changed = False
+
+              # 1a. Einzelner switch-case mit Index 5 und break;/return
+              def repl_case_indexed(m):
+                  nonlocal any_changed
                   block = m.group(0)
                   body = m.group(1)
                   if re.search(r'\b5\b', body):
@@ -117,75 +120,131 @@ jobs:
                       b7 = re.sub(r'\b5\b', '6', b7)
                       b8 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
                       b8 = re.sub(r'\b5\b', '7', b8)
-                      changed = True
+                      any_changed = True
                       return block + "\n" + b7 + "\n" + b8
                   return block
 
-              txt_new = re.sub(
-                  r'[ \t]*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*:([\s\S]*?break;)',
-                  repl_case,
+              txt = re.sub(
+                  r'[ \t]*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*:([\s\S]*?(?:break;|return\b[^;]*;))',
+                  repl_case_indexed,
                   txt
               )
-              if changed:
-                  print(f"[OK] {fp}: switch-cases fuer MACRO_7 & MACRO_8 ergaenzt.")
-                  return txt_new, True
 
-              # 2. Range-Check: >= BUTTON_PRESS_MACRO_1 && <= BUTTON_PRESS_MACRO_6
-              # ID 143/144 liegen nicht direkt hinter 39 -> explizite else-if Zweige fuer Index 6 & 7!
+              # 1b. Fallthrough switch-case (nur wenn noch KEIN case MACRO_7 innerhalb der naechsten 5 Zeilen folgt)
+              lines = txt.splitlines()
+              out_lines = []
+              for idx, ln in enumerate(lines):
+                  m_ft = re.match(r'^([ \t]*)case\s+(GpioAction::)?BUTTON_PRESS_MACRO_6\s*:\s*$', ln)
+                  if m_ft:
+                      lookahead = "\n".join(lines[idx + 1 : idx + 6])
+                      if "BUTTON_PRESS_MACRO_7" not in lookahead:
+                          indent, pref = m_ft.group(1), (m_ft.group(2) or "")
+                          out_lines.append(ln)
+                          out_lines.append(f"{indent}case {pref}BUTTON_PRESS_MACRO_7:")
+                          out_lines.append(f"{indent}case {pref}BUTTON_PRESS_MACRO_8:")
+                          any_changed = True
+                          continue
+                  out_lines.append(ln)
+              txt = "\n".join(out_lines) + ("\n" if orig.endswith("\n") else "")
+
+              # 2a. Range-Check Block: if (x >= BUTTON_PRESS_MACRO_1 && x <= BUTTON_PRESS_MACRO_6) { ... }
               range_pat = re.compile(
                   r'([ \t]*)((?:else\s+)?if\s*\(\s*([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\3\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*\)\s*\{)([\s\S]*?)(\n\1\})'
               )
               def repl_range(m):
-                  nonlocal changed
+                  nonlocal any_changed
                   indent, head, var, prefix, body, close = m.groups()
                   prefix = prefix or ""
                   sub_pat = re.compile(rf'\b{re.escape(var)}\s*-\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_1\b')
                   body7 = sub_pat.sub('6', body)
                   body8 = sub_pat.sub('7', body)
-                  changed = True
+                  any_changed = True
                   return (
                       indent + head + body + close +
                       f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_7) {{" + body7 + close +
                       f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_8) {{" + body8 + close
                   )
+              txt = range_pat.sub(repl_range, txt)
 
-              txt_new = range_pat.sub(repl_range, txt)
-              if changed:
-                  print(f"[OK] {fp}: Range-Check fuer MACRO_7 (143) & MACRO_8 (144) ergaenzt.")
-                  return txt_new, True
-
-              # 3. Array/Liste mit GpioAction::BUTTON_PRESS_MACRO_6
-              arr_pat = re.compile(r'([ \t]*)((?:GpioAction::)?BUTTON_PRESS_MACRO_6)(\s*,?)')
-              def repl_arr(m):
-                  nonlocal changed
-                  indent, tok, comma = m.groups()
-                  prefix = "GpioAction::" if "GpioAction::" in tok else ""
-                  changed = True
-                  return (
-                      f"{indent}{prefix}BUTTON_PRESS_MACRO_6,\n"
-                      f"{indent}{prefix}BUTTON_PRESS_MACRO_7,\n"
-                      f"{indent}{prefix}BUTTON_PRESS_MACRO_8{comma}"
+              # 2b. Inline Range-Ausdruck (nur wenn nicht schon von 2a behandelt)
+              if not any_changed:
+                  inline_range_pat = re.compile(
+                      r'(\b([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\2\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\b)'
                   )
+                  def repl_inline_range(m):
+                      nonlocal any_changed
+                      expr, var, prefix = m.groups()
+                      prefix = prefix or ""
+                      any_changed = True
+                      return f"({expr} || {var} == {prefix}BUTTON_PRESS_MACRO_7 || {var} == {prefix}BUTTON_PRESS_MACRO_8)"
+                  txt = inline_range_pat.sub(repl_inline_range, txt)
 
-              txt_new = arr_pat.sub(repl_arr, txt)
-              if changed:
-                  print(f"[OK] {fp}: Listen-/Array-Eintraege fuer MACRO_7 & MACRO_8 ergaenzt.")
-                  return txt_new, True
+              # 3. Array-/Initialisierer-Liste mit BUTTON_PRESS_MACRO_6 (NICHT bei case/if/return/Kommentar)
+              lines = txt.splitlines()
+              out_lines = []
+              for idx, ln in enumerate(lines):
+                  next_ln = lines[idx + 1] if (idx + 1) < len(lines) else ""
+                  stripped = ln.lstrip()
+                  if (
+                      "BUTTON_PRESS_MACRO_6" in ln
+                      and "BUTTON_PRESS_MACRO_7" not in next_ln
+                      and not stripped.startswith(("case ", "if ", "if(", "else ", "return ", "//", "/*", "*"))
+                      and "==" not in ln and "<=" not in ln and ">=" not in ln
+                  ):
+                      has_comma = ln.rstrip().endswith(",")
+                      base6 = ln if has_comma else (ln + ",")
+                      ln7 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                      ln8 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                      if not has_comma:
+                          ln8 = ln8.rstrip(",")
+                      out_lines.extend([base6, ln7, ln8])
+                      any_changed = True
+                  else:
+                      out_lines.append(ln)
+              txt = "\n".join(out_lines) + ("\n" if orig.endswith("\n") else "")
 
-              return txt, False
+              if any_changed:
+                  print(f"[OK] {fp}: MACRO_7 (143) & MACRO_8 (144) ergaenzt.")
+              return txt, any_changed
 
           # ============================================================================
-          # TEIL A: PROTOBUF (8 SLOTS x 24 INPUTS + ID 143 / 144)
+          # TEIL A: PROTOBUF (proto/*.proto INLINE nanopb + proto/*.options + enums.proto)
           # ============================================================================
           print(f"=== [A] Patche Protobuf: {TARGET_SLOTS} Slots x {TARGET_INPUTS} Inputs ===")
 
           proto_slots_patched = False
           proto_inputs_patched = False
+
+          # A1. Inline Nanopb-Optionen in proto/*.proto (GP2040-CE Standard!)
+          #     z. B.: repeated Macro macroList = 2 [(nanopb).max_count = 6];
+          #            repeated MacroInput macroInputs = 7 [(nanopb).max_count = 30];
+          for fp in walk_files("proto", (".proto",)):
+              txt = read_text(fp)
+              orig = txt
+              txt, n1 = re.subn(
+                  r'(repeated\s+\w+\s+macroList\b[^;]*?max_count\s*[:=]\s*)\d+',
+                  rf'\g<1>{TARGET_SLOTS}',
+                  txt
+              )
+              txt, n2 = re.subn(
+                  r'(repeated\s+\w+\s+macroInputs\b[^;]*?max_count\s*[:=]\s*)\d+',
+                  rf'\g<1>{TARGET_INPUTS}',
+                  txt
+              )
+              if n1:
+                  proto_slots_patched = True
+              if n2:
+                  proto_inputs_patched = True
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] {fp} (inline nanopb) aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
+
+          # A2. Optional zusaetzlich proto/*.options (falls Fork externe .options nutzt)
           for fp in walk_files("proto", (".options",)):
               txt = read_text(fp)
               orig = txt
-              txt, n1 = re.subn(r'(MacroOptions\.macroList\s+max_count:)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
-              txt, n2 = re.subn(r'(Macro\.macroInputs\s+max_count:)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
+              txt, n1 = re.subn(r'(MacroOptions\.macroList\s+max_count\s*[:=]\s*)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
+              txt, n2 = re.subn(r'(Macro\.macroInputs\s+max_count\s*[:=]\s*)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
               if n1:
                   proto_slots_patched = True
               if n2:
@@ -195,9 +254,16 @@ jobs:
                   print(f"[OK] {fp} aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
 
           if not (proto_slots_patched and proto_inputs_patched):
-              print("[FEHLER] Konnte MacroOptions.macroList / Macro.macroInputs in proto/*.options nicht patchen!", file=sys.stderr)
+              print("[FEHLER] Konnte macroList / macroInputs max_count in proto/ nicht patchen!", file=sys.stderr)
+              print(f"  Status: proto_slots_patched={proto_slots_patched}, proto_inputs_patched={proto_inputs_patched}", file=sys.stderr)
+              for fp in walk_files("proto", (".proto", ".options")):
+                  print(f"  Datei: {fp}", file=sys.stderr)
+                  for i, ln in enumerate(read_text(fp).splitlines(), 1):
+                      if "macro" in ln.lower():
+                          print(f"    L{i}: {ln}", file=sys.stderr)
               sys.exit(1)
 
+          # A3. BUTTON_PRESS_MACRO_7 (143) & BUTTON_PRESS_MACRO_8 (144) in proto/enums.proto
           enums_patched = False
           for fp in walk_files("proto", (".proto",)):
               txt = read_text(fp)
@@ -209,6 +275,14 @@ jobs:
                   continue
               m_enum = re.search(r'(enum\s+GpioAction\s*\{[\s\S]*?)(\n\s*\})', txt)
               if m_enum:
+                  enum_body = m_enum.group(1)
+                  for check_id in (MACRO_7_ID, MACRO_8_ID):
+                      if re.search(rf'=\s*{check_id}\s*;', enum_body):
+                          print(f"[FEHLER] ID {check_id} ist in {fp} (enum GpioAction) bereits belegt!", file=sys.stderr)
+                          for ln in enum_body.splitlines():
+                              if str(check_id) in ln:
+                                  print("  Konflikt:", ln, file=sys.stderr)
+                          sys.exit(1)
                   addition = (
                       f"\n    BUTTON_PRESS_MACRO_7 = {MACRO_7_ID};"
                       f"\n    BUTTON_PRESS_MACRO_8 = {MACRO_8_ID};"
@@ -258,7 +332,7 @@ jobs:
                   txt, n_cnt = re.subn(r'(macroList_count\s*=\s*)6\b', rf'\g<1>{TARGET_SLOTS}', txt)
                   cpp_slots_hits += n_cnt
 
-                  # 4. Arithmetische Pin-Suche (BUTTON_PRESS_MACRO_1 + i) fuer nicht-fortlaufende IDs 143/144 sichern
+                  # 4. Arithmetische Pin-Suche (BUTTON_PRESS_MACRO_1 + i) fuer ID 143/144 sichern
                   if "BUTTON_PRESS_MACRO_1" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
                       arith_pat = re.compile(r'((?:GpioAction::)?BUTTON_PRESS_MACRO_1)\s*\+\s*(\w+)')
                       if arith_pat.search(txt):
@@ -282,7 +356,7 @@ jobs:
           print(f"[CHECK C++] MAX_MACRO_LIMIT hits={cpp_slots_hits}, MAX_MACRO_INPUT_LIMIT hits={cpp_inputs_hits}, MACRO_7/8 hits={cpp_enum_hits}")
 
           if cpp_slots_hits == 0:
-              print("[FEHLER] MAX_MACRO_LIMIT wurde in headers/ & src/ NIRGENDS gefunden! Abbruch statt fehlerhaftem 6-Slot-Build.", file=sys.stderr)
+              print("[FEHLER] MAX_MACRO_LIMIT wurde in headers/ & src/ NIRGENDS gefunden!", file=sys.stderr)
               sys.exit(1)
 
           # ============================================================================
@@ -292,15 +366,15 @@ jobs:
 
           www_slots_hits = 0
           www_inputs_hits = 0
-          www_pins_hits = 0
+          www_pins_present = 0
 
           for fp in walk_files(os.path.join("www", "src"), (".ts", ".tsx", ".js", ".jsx", ".json")):
               txt = read_text(fp)
               orig = txt
 
-              # 1. Makro-Slot-Limit Konstanten (MAX_MACRO_LIMIT, MAX_MACRO_SLOTS, MAX_MACROS)
+              # 1. Makro-Slot-Limit Konstanten
               for pat in [
-                  r'(\bMAX_MACRO_LIMIT\s*[:=]\s*)\d+',
+                  r'(\b(?:MAX_)?MACRO_LIMIT\s*[:=]\s*)\d+',
                   r'(\bMAX_MACRO_SLOTS\s*[:=]\s*)\d+',
                   r'(\bMAX_MACROS\s*[:=]\s*)\d+',
                   r'(macroList\.length\s*<\s*)6\b',
@@ -308,18 +382,19 @@ jobs:
                   txt, n = re.subn(pat, rf'\g<1>{TARGET_SLOTS}', txt)
                   www_slots_hits += n
 
-              # 2. Makro-Input-Limit Konstanten (MAX_MACRO_INPUT_LIMIT, MAX_MACRO_INPUTS)
+              # 2. Makro-Input-Limit Konstanten
               for pat in [
-                  r'(\bMAX_MACRO_INPUT_LIMIT\s*[:=]\s*)\d+',
+                  r'(\b(?:MAX_)?MACRO_INPUT_LIMIT\s*[:=]\s*)\d+',
                   r'(\bMAX_MACRO_INPUTS\s*[:=]\s*)\d+',
               ]:
                   txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
                   www_inputs_hits += n
 
-              # 3. BUTTON_PRESS_MACRO_7 (143) & BUTTON_PRESS_MACRO_8 (144) in Data/Pins.ts, Locales, etc.
-              if "BUTTON_PRESS_MACRO_6" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
+              # 3. BUTTON_PRESS_MACRO_7 (143) & BUTTON_PRESS_MACRO_8 (144) in Data/Pins.ts, Groups, Locales
+              if "BUTTON_PRESS_MACRO_6" in txt:
+                  # 3a. Numerische Definition: BUTTON_PRESS_MACRO_6: 39
                   num_pat = re.compile(r'([ \t]*)([\'"]?BUTTON_PRESS_MACRO_6[\'"]?\s*[:=]\s*)39(\s*,?)')
-                  if num_pat.search(txt):
+                  if num_pat.search(txt) and not re.search(r'BUTTON_PRESS_MACRO_7[\'"]?\s*[:=]\s*\d+', txt):
                       def repl_num(m):
                           indent, lhs, comma = m.groups()
                           lhs7 = lhs.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
@@ -330,42 +405,43 @@ jobs:
                               f"{indent}{lhs8}{MACRO_8_ID}{comma}"
                           )
                       txt = num_pat.sub(repl_num, txt)
-                      www_pins_hits += 1
-                  else:
-                      line_pat = re.compile(r'^([ \t]*.*BUTTON_PRESS_MACRO_6.*)$', flags=re.MULTILINE)
-                      def repl_line(m):
-                          line6 = m.group(1)
-                          has_comma = line6.rstrip().endswith(",")
-                          base6 = line6 if has_comma else (line6 + ",")
-                          line7 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
-                          line7 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>7', line7, flags=re.IGNORECASE)
-                          line7 = re.sub(r'(\s)6([\'"])', r'\g<1>7\2', line7)
-                          line8 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
-                          line8 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>8', line8, flags=re.IGNORECASE)
-                          line8 = re.sub(r'(\s)6([\'"])', r'\g<1>8\2', line8)
+
+                  # 3b. Weitere Vorkommen in derselben oder anderen Dateien (z. B. Gruppen-Arrays, Locales)
+                  lines = txt.splitlines()
+                  out_lines = []
+                  i = 0
+                  while i < len(lines):
+                      ln = lines[i]
+                      next_ln = lines[i + 1] if (i + 1) < len(lines) else ""
+                      if "BUTTON_PRESS_MACRO_6" in ln and "BUTTON_PRESS_MACRO_7" not in next_ln:
+                          has_comma = ln.rstrip().endswith(",")
+                          base6 = ln if has_comma else (ln + ",")
+                          ln7 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                          ln7 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>7', ln7, flags=re.IGNORECASE)
+                          ln7 = re.sub(r'(\s)6([\'"])', r'\g<1>7\2', ln7)
+                          ln8 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                          ln8 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>8', ln8, flags=re.IGNORECASE)
+                          ln8 = re.sub(r'(\s)6([\'"])', r'\g<1>8\2', ln8)
                           if not has_comma:
-                              line8 = line8.rstrip(",")
-                          return f"{base6}\n{line7}\n{line8}"
-                      txt_new, n_l = line_pat.subn(repl_line, txt)
-                      if n_l > 0:
-                          txt = txt_new
-                          www_pins_hits += n_l
+                              ln8 = ln8.rstrip(",")
+                          out_lines.extend([base6, ln7, ln8])
+                      else:
+                          out_lines.append(ln)
+                      i += 1
+                  txt = "\n".join(out_lines) + ("\n" if orig.endswith("\n") else "")
+
+              if "BUTTON_PRESS_MACRO_7" in txt and "BUTTON_PRESS_MACRO_8" in txt:
+                  www_pins_present += 1
 
               if txt != orig:
                   write_text(fp, txt)
                   print(f"[OK] Web-UI gepatcht: {fp}")
 
-          print(f"[CHECK WEB-UI] slots_hits={www_slots_hits}, inputs_hits={www_inputs_hits}, pins_hits={www_pins_hits}")
+          print(f"[CHECK WEB-UI] slots_hits={www_slots_hits}, inputs_hits={www_inputs_hits}, files_with_MACRO_7_8={www_pins_present}")
 
-          if os.path.isdir(os.path.join("www", "src")) and www_pins_hits == 0:
-              print("[FEHLER] BUTTON_PRESS_MACRO_7/8 konnte in www/src/ nicht gepatcht werden!", file=sys.stderr)
+          if os.path.isdir(os.path.join("www", "src")) and www_pins_present == 0:
+              print("[FEHLER] BUTTON_PRESS_MACRO_7/8 fehlt in www/src/!", file=sys.stderr)
               sys.exit(1)
-
-          if os.path.isdir(os.path.join("www", "src")) and www_slots_hits == 0:
-              print("[INFO] Keine statische Slot-Konstante in www/src/ gefunden (Web-UI rendert macroList evtl. dynamisch von der Firmware).")
-              for fp in walk_files(os.path.join("www", "src"), (".ts", ".tsx", ".js", ".jsx")):
-                  if "macro" in fp.lower():
-                      print("  Gepruefte Web-Macro-Datei:", fp)
 
           # ============================================================================
           # TEIL D: HARDCODED MACRO BANKS (BANK 1-3, 50ms) INJIZIEREN
@@ -725,6 +801,6 @@ jobs:
       - name: Firmware-Artifact hochladen
         uses: actions/upload-artifact@v4
         with:
-          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v3-HardcodedBanks-MK11
+          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v4-HardcodedBanks-MK11
           path: release_out/*.uf2
           if-no-files-found: error
