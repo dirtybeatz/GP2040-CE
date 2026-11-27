@@ -1,0 +1,1002 @@
+name: GP2040-CE All-in-One v6 (8 Web-Slots + Hardcoded Banks + OLED Anzeige MK11)
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: "Board auswaehlen (oder unten custom_board fuer eigenen Ordnernamen nutzen)"
+        required: true
+        default: "Haute42COSMOX"
+        type: choice
+        options:
+          - Haute42COSMOX
+          - Haute42
+          - FlatboxRev4
+          - FlatboxRev5
+          - FlatboxRev5Southpaw
+          - FlatboxRev5RGB
+          - Pico
+          - PicoFightingBoard
+          - RP2040AdvancedBreakoutBoard
+          - GP2040
+      custom_board:
+        description: "Optional: Eigener Board-Ordnername aus configs/ (z. B. FlatboxUltra, Haute42S16, G-ROLLZ)"
+        required: false
+        default: ""
+        type: string
+      web_macro_slots:
+        description: "Anzahl Web-Config Makro-Slots (Standard: 8 fuer dein Backup-JSON)"
+        required: false
+        default: "8"
+        type: string
+      web_macro_inputs:
+        description: "Max. Inputs pro Web-Config Makro-Slot (Standard: 24, sicher im 32 KB EEPROM)"
+        required: false
+        default: "24"
+        type: string
+      build_webui:
+        description: "Web-Configurator (www) mit 8 Slots mitbauen (MUSS aktiviert sein!)"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build-combined-firmware:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Ziel-Board pruefen
+        shell: bash
+        run: |
+          TARGET_BOARD="${{ inputs.custom_board || inputs.board }}"
+          echo "TARGET_BOARD=$TARGET_BOARD" >> "$GITHUB_ENV"
+          echo "WEB_MACRO_SLOTS=${{ inputs.web_macro_slots }}" >> "$GITHUB_ENV"
+          echo "WEB_MACRO_INPUTS=${{ inputs.web_macro_inputs }}" >> "$GITHUB_ENV"
+          echo "Gewaehltes Board: $TARGET_BOARD | Slots: ${{ inputs.web_macro_slots }} | Inputs: ${{ inputs.web_macro_inputs }}"
+          if [ ! -d "configs/$TARGET_BOARD" ]; then
+            echo "::error::Board-Ordner 'configs/$TARGET_BOARD' nicht gefunden! Verfuegbare Boards:"
+            ls -1 configs/
+            exit 1
+          fi
+
+      - name: ARM-Toolchain, Protobuf & Build-Abhaengigkeiten installieren
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-protobuf protobuf-compiler
+
+      - name: 8 Web-Slots + Hardcoded Banks + OLED-Anzeige patchen
+        shell: python3 {0}
+        run: |
+          import os
+          import re
+          import sys
+
+          TARGET_SLOTS  = int(os.environ.get("WEB_MACRO_SLOTS", "8"))
+          TARGET_INPUTS = int(os.environ.get("WEB_MACRO_INPUTS", "24"))
+          MACRO_7_ID    = 143
+          MACRO_8_ID    = 144
+
+          def read_text(path):
+              with open(path, "r", encoding="utf-8") as f:
+                  return f.read()
+
+          def write_text(path, content):
+              parent = os.path.dirname(path)
+              if parent:
+                  os.makedirs(parent, exist_ok=True)
+              with open(path, "w", encoding="utf-8", newline="\n") as f:
+                  f.write(content)
+
+          def walk_files(root_dir, exts):
+              if not os.path.isdir(root_dir):
+                  return
+              for r, dirs, files in os.walk(root_dir):
+                  dirs[:] = [d for d in dirs if d not in ("node_modules", "build", "dist", ".git")]
+                  for fn in sorted(files):
+                      if fn.endswith(exts):
+                          yield os.path.join(r, fn)
+
+          def find_matching_brace(src, open_brace_idx):
+              """Findet die passende schliessende '}' unter Ignorierung von Strings und Kommentaren."""
+              n = len(src)
+              depth = 0
+              i = open_brace_idx
+              in_str = False
+              in_chr = False
+              in_line_comment = False
+              in_block_comment = False
+
+              while i < n:
+                  ch = src[i]
+                  nxt = src[i + 1] if (i + 1) < n else ""
+
+                  if in_line_comment:
+                      if ch == "\n":
+                          in_line_comment = False
+                      i += 1
+                      continue
+                  if in_block_comment:
+                      if ch == "*" and nxt == "/":
+                          in_block_comment = False
+                          i += 2
+                          continue
+                      i += 1
+                      continue
+                  if in_str:
+                      if ch == "\\" and (i + 1) < n:
+                          i += 2
+                          continue
+                      if ch == '"':
+                          in_str = False
+                      i += 1
+                      continue
+                  if in_chr:
+                      if ch == "\\" and (i + 1) < n:
+                          i += 2
+                          continue
+                      if ch == "'":
+                          in_chr = False
+                      i += 1
+                      continue
+
+                  if ch == "/" and nxt == "/":
+                      in_line_comment = True
+                      i += 2
+                      continue
+                  if ch == "/" and nxt == "*":
+                      in_block_comment = True
+                      i += 2
+                      continue
+                  if ch == '"':
+                      in_str = True
+                      i += 1
+                      continue
+                  if ch == "'":
+                      in_chr = True
+                      i += 1
+                      continue
+
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return i
+                  i += 1
+
+              return -1
+
+          def patch_macro_enum_cpp(txt, fp):
+              """Ergaenzt BUTTON_PRESS_MACRO_7 (ID 143) und BUTTON_PRESS_MACRO_8 (ID 144) lokal-idempotent in C++."""
+              if "BUTTON_PRESS_MACRO_6" not in txt:
+                  return txt, False
+
+              orig = txt
+              any_changed = False
+
+              # 1a. Array-Initialisierer mit fester Groesse [6] (z. B. src/config_utils.cpp actionList[6])
+              arr_init_pat = re.compile(
+                  r'(\bGpioAction\s+\w+\s*\[\s*)6(\s*\]\s*=\s*\{[^;{}]*?)((?:GpioAction::)?BUTTON_PRESS_MACRO_6)(\s*,?\s*\})'
+              )
+              def repl_arr_init(m):
+                  nonlocal any_changed
+                  decl, mid, tok6, close = m.groups()
+                  if "BUTTON_PRESS_MACRO_7" in mid:
+                      return m.group(0)
+                  pref = "GpioAction::" if "GpioAction::" in tok6 else ""
+                  any_changed = True
+                  return (
+                      f"{decl}{TARGET_SLOTS}{mid}"
+                      f"{pref}BUTTON_PRESS_MACRO_6, {pref}BUTTON_PRESS_MACRO_7, {pref}BUTTON_PRESS_MACRO_8"
+                      f"{close}"
+                  )
+              txt = arr_init_pat.sub(repl_arr_init, txt)
+
+              # 1b. Array-Initialisierer ohne feste Groesse: { ... BUTTON_PRESS_MACRO_1 ... BUTTON_PRESS_MACRO_6 }
+              arr_unsized_pat = re.compile(
+                  r'(\{[^;{}]*?)((?:GpioAction::)?BUTTON_PRESS_MACRO_6)(\s*,?\s*\})'
+              )
+              def repl_arr_unsized(m):
+                  nonlocal any_changed
+                  mid, tok6, close = m.groups()
+                  if "BUTTON_PRESS_MACRO_7" in mid or "BUTTON_PRESS_MACRO_1" not in mid:
+                      return m.group(0)
+                  pref = "GpioAction::" if "GpioAction::" in tok6 else ""
+                  any_changed = True
+                  return (
+                      f"{mid}"
+                      f"{pref}BUTTON_PRESS_MACRO_6, {pref}BUTTON_PRESS_MACRO_7, {pref}BUTTON_PRESS_MACRO_8"
+                      f"{close}"
+                  )
+              txt = arr_unsized_pat.sub(repl_arr_unsized, txt)
+
+              # 2a. Einzelner switch-case mit Index 5 und break;/return
+              case_idx_pat = re.compile(
+                  r'([ \t]*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*:([\s\S]*?(?:break;|return\b[^;]*;)))(\s*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_7\b)?'
+              )
+              def repl_case_indexed(m):
+                  nonlocal any_changed
+                  block, body, already7 = m.groups()
+                  if already7:
+                      return m.group(0)
+                  if re.search(r'\b5\b', body):
+                      b7 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                      b7 = re.sub(r'\b5\b', '6', b7)
+                      b8 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                      b8 = re.sub(r'\b5\b', '7', b8)
+                      any_changed = True
+                      return block + "\n" + b7 + "\n" + b8
+                  return m.group(0)
+              txt = case_idx_pat.sub(repl_case_indexed, txt)
+
+              # 2b. Fallthrough switch-case
+              lines = txt.splitlines()
+              out_lines = []
+              for idx, ln in enumerate(lines):
+                  m_ft = re.match(r'^([ \t]*)case\s+(GpioAction::)?BUTTON_PRESS_MACRO_6\s*:\s*$', ln)
+                  if m_ft:
+                      lookahead = "\n".join(lines[idx + 1 : idx + 6])
+                      if "BUTTON_PRESS_MACRO_7" not in lookahead:
+                          indent, pref = m_ft.group(1), (m_ft.group(2) or "")
+                          out_lines.append(ln)
+                          out_lines.append(f"{indent}case {pref}BUTTON_PRESS_MACRO_7:")
+                          out_lines.append(f"{indent}case {pref}BUTTON_PRESS_MACRO_8:")
+                          any_changed = True
+                          continue
+                  out_lines.append(ln)
+              txt = "\n".join(out_lines) + ("\n" if orig.endswith("\n") else "")
+
+              # 3a. Range-Check Block: if (x >= BUTTON_PRESS_MACRO_1 && x <= BUTTON_PRESS_MACRO_6) { ... }
+              range_pat = re.compile(
+                  r'([ \t]*)((?:else\s+)?if\s*\(\s*([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\3\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*\)\s*\{)([\s\S]*?)(\n\1\})(\s*else\s+if\s*\([^)]*BUTTON_PRESS_MACRO_7)?'
+              )
+              def repl_range(m):
+                  nonlocal any_changed
+                  indent, head, var, prefix, body, close, already7 = m.groups()
+                  if already7:
+                      return m.group(0)
+                  prefix = prefix or ""
+                  sub_pat = re.compile(rf'\b{re.escape(var)}\s*-\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_1\b')
+                  body7 = sub_pat.sub('6', body)
+                  body8 = sub_pat.sub('7', body)
+                  any_changed = True
+                  return (
+                      indent + head + body + close +
+                      f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_7) {{" + body7 + close +
+                      f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_8) {{" + body8 + close
+                  )
+              txt = range_pat.sub(repl_range, txt)
+
+              # 3b. Inline Range-Ausdruck
+              inline_range_pat = re.compile(
+                  r'(\b([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\2\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\b)(\s*\|\|\s*\2\s*==\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_7)?'
+              )
+              def repl_inline_range(m):
+                  nonlocal any_changed
+                  expr, var, prefix, already7 = m.groups()
+                  if already7:
+                      return m.group(0)
+                  prefix = prefix or ""
+                  any_changed = True
+                  return f"({expr} || {var} == {prefix}BUTTON_PRESS_MACRO_7 || {var} == {prefix}BUTTON_PRESS_MACRO_8)"
+              if "else if (" not in txt or "BUTTON_PRESS_MACRO_7" not in txt:
+                  txt = inline_range_pat.sub(repl_inline_range, txt)
+
+              # 3c. else-if Kette mit == BUTTON_PRESS_MACRO_6 und Index 5
+              elif_pat = re.compile(
+                  r'([ \t]*else\s+if\s*\([^)]*(?:GpioAction::)?BUTTON_PRESS_MACRO_6[^)]*\)\s*\{([\s\S]*?)\n[ \t]*\})(\s*else\s+if\s*\([^)]*BUTTON_PRESS_MACRO_7)?'
+              )
+              def repl_elif(m):
+                  nonlocal any_changed
+                  block, body, already7 = m.groups()
+                  if already7:
+                      return m.group(0)
+                  if re.search(r'\b5\b', body):
+                      b7 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                      b7 = re.sub(r'\b5\b', '6', b7)
+                      b8 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                      b8 = re.sub(r'\b5\b', '7', b8)
+                      any_changed = True
+                      return block + "\n" + b7 + "\n" + b8
+                  return m.group(0)
+              txt = elif_pat.sub(repl_elif, txt)
+
+              if any_changed:
+                  print(f"[OK] {fp}: MACRO_7 (143) & MACRO_8 (144) ergaenzt.")
+              return txt, any_changed
+
+          # ============================================================================
+          # TEIL A: PROTOBUF (proto/*.proto INLINE nanopb + proto/*.options + enums.proto)
+          # ============================================================================
+          print(f"=== [A] Patche Protobuf: {TARGET_SLOTS} Slots x {TARGET_INPUTS} Inputs ===")
+
+          proto_slots_patched = False
+          proto_inputs_patched = False
+
+          for fp in walk_files("proto", (".proto",)):
+              txt = read_text(fp)
+              orig = txt
+              txt, n1 = re.subn(
+                  r'(repeated\s+\w+\s+macroList\b[^;]*?max_count\s*[:=]\s*)\d+',
+                  rf'\g<1>{TARGET_SLOTS}',
+                  txt
+              )
+              txt, n2 = re.subn(
+                  r'(repeated\s+\w+\s+macroInputs\b[^;]*?max_count\s*[:=]\s*)\d+',
+                  rf'\g<1>{TARGET_INPUTS}',
+                  txt
+              )
+              if n1:
+                  proto_slots_patched = True
+              if n2:
+                  proto_inputs_patched = True
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] {fp} (inline nanopb) aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
+
+          for fp in walk_files("proto", (".options",)):
+              txt = read_text(fp)
+              orig = txt
+              txt, n1 = re.subn(r'(MacroOptions\.macroList\s+max_count\s*[:=]\s*)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
+              txt, n2 = re.subn(r'(Macro\.macroInputs\s+max_count\s*[:=]\s*)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
+              if n1:
+                  proto_slots_patched = True
+              if n2:
+                  proto_inputs_patched = True
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] {fp} aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
+
+          if not (proto_slots_patched and proto_inputs_patched):
+              print("[FEHLER] Konnte macroList / macroInputs max_count in proto/ nicht patchen!", file=sys.stderr)
+              sys.exit(1)
+
+          enums_patched = False
+          for fp in walk_files("proto", (".proto",)):
+              txt = read_text(fp)
+              if "BUTTON_PRESS_MACRO_6" not in txt:
+                  continue
+              if "BUTTON_PRESS_MACRO_7" in txt and "BUTTON_PRESS_MACRO_8" in txt:
+                  enums_patched = True
+                  print(f"[INFO] {fp}: BUTTON_PRESS_MACRO_7 & _8 bereits vorhanden.")
+                  continue
+              m_enum = re.search(r'(enum\s+GpioAction\s*\{[\s\S]*?)(\n\s*\})', txt)
+              if m_enum:
+                  enum_body = m_enum.group(1)
+                  for check_id in (MACRO_7_ID, MACRO_8_ID):
+                      if re.search(rf'=\s*{check_id}\s*;', enum_body):
+                          print(f"[FEHLER] ID {check_id} ist in {fp} (enum GpioAction) bereits belegt!", file=sys.stderr)
+                          sys.exit(1)
+                  addition = (
+                      f"\n    BUTTON_PRESS_MACRO_7 = {MACRO_7_ID};"
+                      f"\n    BUTTON_PRESS_MACRO_8 = {MACRO_8_ID};"
+                  )
+                  txt = txt[:m_enum.start(2)] + addition + txt[m_enum.start(2):]
+                  write_text(fp, txt)
+                  enums_patched = True
+                  print(f"[OK] {fp}: BUTTON_PRESS_MACRO_7={MACRO_7_ID}, BUTTON_PRESS_MACRO_8={MACRO_8_ID} ergaenzt.")
+
+          if not enums_patched:
+              print("[FEHLER] Konnte BUTTON_PRESS_MACRO_7/8 nicht in proto/*.proto eintragen!", file=sys.stderr)
+              sys.exit(1)
+
+          # ============================================================================
+          # TEIL B: C++ FIRMWARE REPO-WEIT PATCHEN (headers/ & src/)
+          # ============================================================================
+          print("=== [B] Patche C++ Firmware (headers/ & src/) ===")
+
+          cpp_slots_hits = 0
+          cpp_inputs_hits = 0
+          cpp_enum_hits = 0
+
+          for root_dir in ("headers", "src"):
+              for fp in walk_files(root_dir, (".h", ".hpp", ".c", ".cpp")):
+                  if os.path.basename(fp) == "hardcoded_macros.h":
+                      continue
+                  txt = read_text(fp)
+                  orig = txt
+
+                  for pat in [
+                      r'(#define\s+MAX_MACRO_LIMIT\s+)\d+',
+                      r'((?:static\s+)?(?:constexpr|const)\s+[\w:]+\s+MAX_MACRO_LIMIT\s*=\s*)\d+',
+                  ]:
+                      txt, n = re.subn(pat, rf'\g<1>{TARGET_SLOTS}', txt)
+                      cpp_slots_hits += n
+
+                  for pat in [
+                      r'(#define\s+MAX_MACRO_INPUT_LIMIT\s+)\d+',
+                      r'((?:static\s+)?(?:constexpr|const)\s+[\w:]+\s+MAX_MACRO_INPUT_LIMIT\s*=\s*)\d+',
+                  ]:
+                      txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
+                      cpp_inputs_hits += n
+
+                  txt, n_cnt = re.subn(r'(macroList_count\s*=\s*)6\b', rf'\g<1>{TARGET_SLOTS}', txt)
+                  cpp_slots_hits += n_cnt
+
+                  if "BUTTON_PRESS_MACRO_1" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
+                      arith_pat = re.compile(r'((?:GpioAction::)?BUTTON_PRESS_MACRO_1)\s*\+\s*(\w+)')
+                      if arith_pat.search(txt):
+                          def repl_arith(m):
+                              tok, idx_var = m.groups()
+                              pref = "GpioAction::" if "GpioAction::" in tok else ""
+                              return f"(({idx_var}) < 6 ? ({pref}BUTTON_PRESS_MACRO_1 + ({idx_var})) : ({pref}BUTTON_PRESS_MACRO_7 + (({idx_var}) - 6)))"
+                          txt = arith_pat.sub(repl_arith, txt)
+                          cpp_enum_hits += 1
+                          print(f"[OK] {fp}: BUTTON_PRESS_MACRO_1 + i fuer ID 143/144 abgesichert.")
+
+                  txt, enum_changed = patch_macro_enum_cpp(txt, fp)
+                  if enum_changed:
+                      cpp_enum_hits += 1
+
+                  if txt != orig:
+                      write_text(fp, txt)
+                      print(f"[OK] C++ gepatcht: {fp}")
+                      for ln_no, ln in enumerate(txt.splitlines(), 1):
+                          if "BUTTON_PRESS_MACRO_7" in ln or "MAX_MACRO_" in ln:
+                              print(f"    L{ln_no}: {ln.strip()}")
+
+          print(f"[CHECK C++] MAX_MACRO_LIMIT hits={cpp_slots_hits}, MAX_MACRO_INPUT_LIMIT hits={cpp_inputs_hits}, MACRO_7/8 hits={cpp_enum_hits}")
+
+          if cpp_slots_hits == 0:
+              print("[FEHLER] MAX_MACRO_LIMIT wurde in headers/ & src/ NIRGENDS gefunden!", file=sys.stderr)
+              sys.exit(1)
+
+          # ============================================================================
+          # TEIL C: WEB-UI (www/src/) REPO-WEIT PATCHEN
+          # ============================================================================
+          print("=== [C] Patche Web-Configurator (www/src/) ===")
+
+          www_slots_hits = 0
+          www_inputs_hits = 0
+          www_pins_present = 0
+
+          for fp in walk_files(os.path.join("www", "src"), (".ts", ".tsx", ".js", ".jsx", ".json")):
+              txt = read_text(fp)
+              orig = txt
+
+              for pat in [
+                  r'(\b(?:MAX_)?MACRO_LIMIT\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACRO_SLOTS\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACROS\s*[:=]\s*)\d+',
+                  r'(macroList\.length\s*<\s*)6\b',
+              ]:
+                  txt, n = re.subn(pat, rf'\g<1>{TARGET_SLOTS}', txt)
+                  www_slots_hits += n
+
+              for pat in [
+                  r'(\b(?:MAX_)?MACRO_INPUT_LIMIT\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACRO_INPUTS\s*[:=]\s*)\d+',
+              ]:
+                  txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
+                  www_inputs_hits += n
+
+              if "BUTTON_PRESS_MACRO_6" in txt:
+                  num_pat = re.compile(r'([ \t]*)([\'"]?BUTTON_PRESS_MACRO_6[\'"]?\s*[:=]\s*)39(\s*,?)')
+                  if num_pat.search(txt) and not re.search(r'BUTTON_PRESS_MACRO_7[\'"]?\s*[:=]\s*\d+', txt):
+                      def repl_num(m):
+                          indent, lhs, comma = m.groups()
+                          lhs7 = lhs.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                          lhs8 = lhs.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                          return (
+                              f"{indent}{lhs}39,\n"
+                              f"{indent}{lhs7}{MACRO_7_ID},\n"
+                              f"{indent}{lhs8}{MACRO_8_ID}{comma}"
+                          )
+                      txt = num_pat.sub(repl_num, txt)
+
+                  lines = txt.splitlines()
+                  out_lines = []
+                  i = 0
+                  while i < len(lines):
+                      ln = lines[i]
+                      next_ln = lines[i + 1] if (i + 1) < len(lines) else ""
+                      if "BUTTON_PRESS_MACRO_6" in ln and "BUTTON_PRESS_MACRO_7" not in next_ln:
+                          has_comma = ln.rstrip().endswith(",")
+                          base6 = ln if has_comma else (ln + ",")
+                          ln7 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                          ln7 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>7', ln7, flags=re.IGNORECASE)
+                          ln7 = re.sub(r'(\s)6([\'"])', r'\g<1>7\2', ln7)
+                          ln8 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                          ln8 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>8', ln8, flags=re.IGNORECASE)
+                          ln8 = re.sub(r'(\s)6([\'"])', r'\g<1>8\2', ln8)
+                          if not has_comma:
+                              ln8 = ln8.rstrip(",")
+                          out_lines.extend([base6, ln7, ln8])
+                      else:
+                          out_lines.append(ln)
+                      i += 1
+                  txt = "\n".join(out_lines) + ("\n" if orig.endswith("\n") else "")
+
+              if "BUTTON_PRESS_MACRO_7" in txt and "BUTTON_PRESS_MACRO_8" in txt:
+                  www_pins_present += 1
+
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] Web-UI gepatcht: {fp}")
+
+          print(f"[CHECK WEB-UI] slots_hits={www_slots_hits}, inputs_hits={www_inputs_hits}, files_with_MACRO_7_8={www_pins_present}")
+
+          if os.path.isdir(os.path.join("www", "src")) and www_pins_present == 0:
+              print("[FEHLER] BUTTON_PRESS_MACRO_7/8 fehlt in www/src/!", file=sys.stderr)
+              sys.exit(1)
+
+          # ============================================================================
+          # TEIL D: HARDCODED MACRO BANKS (BANK 1-3, 50ms) + OLED-ANZEIGE INJIZIEREN
+          # ============================================================================
+          print("=== [D] Injiziere Hardcoded Macro Banks + OLED-Anzeige (0 Bytes EEPROM) ===")
+
+          header_path = os.path.join("headers", "addons", "hardcoded_macros.h")
+          header_code = r"""#ifndef _HARDCODED_MACROS_H_
+          #define _HARDCODED_MACROS_H_
+
+          #include <cstddef>
+          #include <cstdint>
+          #include <string>
+          #include "gamepad.h"
+          #include "pico/time.h"
+
+          namespace HardcodedMacros {
+
+          // ============================================================================
+          // KONFIGURATION: TRIGGER, OLED & VERHALTEN
+          // ============================================================================
+          // Select (S1, GPIO 16 im kombinierten Backup) dient als:
+          //   - Bank-Wechsel-Taste (On-Release: kurz antippen & loslassen)
+          //   - Modifier fuer Combo 1 (Select + L1) und Combo 2 (Select + R1)
+          constexpr uint32_t BANK_SWITCH_MODIFIER   = GAMEPAD_MASK_S1; // Select / Share
+          constexpr uint32_t COMBO_1_BUTTON         = GAMEPAD_MASK_L1; // L1
+          constexpr uint32_t COMBO_2_BUTTON         = GAMEPAD_MASK_R1; // R1
+
+          // Verhindert auf PS4, dass Select (Share) das Share-Menue oeffnet.
+          // GP2040-CE System-Hotkeys (Start+Select+... und Fn+...) bleiben voll intakt,
+          // da gamepad->hotkey() VOR diesem Modul ausgefuehrt wird.
+          constexpr bool SUPPRESS_SELECT_OUTPUT     = true;
+
+          // OLED-Anzeige (128x64, 21 Spalten x 8 Zeilen):
+          // - Dauerhaftes kompaktes Badge unten rechts (Zeile 6, Spalte 13 -> frei ueber Input History!)
+          // - Zusaetzliches 2-Sekunden-Banner (invertiert) auf Zeile 0 beim Bankwechsel
+          constexpr uint8_t  OLED_BADGE_COL         = 13;
+          constexpr uint8_t  OLED_BADGE_ROW         = 6;
+          constexpr uint32_t OLED_BANNER_DURATION_MS = 2000U;
+
+          // ============================================================================
+          // DATENSTRUKTUREN (liegen komplett im Flash-ROM, 0 Bytes EEPROM!)
+          // ============================================================================
+          struct MacroStep {
+              uint32_t buttonMask;     // Bits 0..15 = Buttons, Bits 16..19 = D-Pad (U/D/L/R)
+              uint32_t durationUs;     // Haltezeit in Mikrosekunden (50 ms = 50000)
+              uint32_t waitDurationUs; // Pause danach in Mikrosekunden (50 ms = 50000)
+          };
+
+          struct MacroSequence {
+              const char* name;
+              const MacroStep* steps;
+              size_t stepCount;
+          };
+
+          struct MacroBank {
+              const char* name;
+              const char* oledBadge;   // 8 Zeichen fuer Zeile 6, Spalte 13..20
+              const char* oledBanner;  // 21 Zeichen fuer 2s-Banner auf Zeile 0
+              MacroSequence combo1;    // Select + L1
+              MacroSequence combo2;    // Select + R1
+          };
+
+          // ============================================================================
+          // BANK 1: SCORPION (alle Timings auf runde 50 ms / 50000 us)
+          // ============================================================================
+          // Fatality 1 - You're Next (Left, Down, Down, B3)
+          static constexpr MacroStep BANK1_COMBO1_STEPS[] = {
+              { 262144U, 50000U, 50000U }, // Left
+              { 131072U, 50000U, 50000U }, // Down
+              { 131072U, 50000U, 50000U }, // Down
+              {      4U, 50000U,     0U }, // B3 (Square)
+          };
+
+          // Fatality 2 - Chain Reaction (Down, Right, Left, B4)
+          static constexpr MacroStep BANK1_COMBO2_STEPS[] = {
+              { 131072U, 50000U, 50000U }, // Down
+              { 524288U, 50000U, 50000U }, // Right
+              { 262144U, 50000U, 50000U }, // Left
+              {      8U, 50000U,     0U }, // B4 (Triangle)
+          };
+
+          // ============================================================================
+          // BANK 2: SUB-ZERO (alle Timings auf runde 50 ms / 50000 us)
+          // ============================================================================
+          // Fatality 1 - Ice-Cutioner (Left, Right, Left, B4)
+          static constexpr MacroStep BANK2_COMBO1_STEPS[] = {
+              { 262144U, 50000U, 50000U }, // Left
+              { 524288U, 50000U, 50000U }, // Right
+              { 262144U, 50000U, 50000U }, // Left
+              {      8U, 50000U,     0U }, // B4 (Triangle)
+          };
+
+          // Fatality 2 - Frozen in Time (Right, Down, Right, B2)
+          static constexpr MacroStep BANK2_COMBO2_STEPS[] = {
+              { 524288U, 50000U, 50000U }, // Right
+              { 131072U, 50000U, 50000U }, // Down
+              { 524288U, 50000U, 50000U }, // Right
+              {      2U, 50000U,     0U }, // B2 (Circle)
+          };
+
+          // ============================================================================
+          // BANK 3: LIU KANG (alle Timings auf runde 50 ms / 50000 us)
+          // ============================================================================
+          // Fatality 1 - Burn Out (Close, P1: Down, Left, Down, Right, B3)
+          static constexpr MacroStep BANK3_COMBO1_STEPS[] = {
+              { 131072U, 50000U, 50000U }, // Down
+              { 262144U, 50000U, 50000U }, // Left
+              { 131072U, 50000U, 50000U }, // Down
+              { 524288U, 50000U, 50000U }, // Right
+              {      4U, 50000U,     0U }, // B3 (Square)
+          };
+
+          // Fatality 2 - Belly of the Beast (Mid, P1: Left, Down, Left, Right, B4)
+          static constexpr MacroStep BANK3_COMBO2_STEPS[] = {
+              { 262144U, 50000U, 50000U }, // Left
+              { 131072U, 50000U, 50000U }, // Down
+              { 262144U, 50000U, 50000U }, // Left
+              { 524288U, 50000U, 50000U }, // Right
+              {      8U, 50000U,     0U }, // B4 (Triangle)
+          };
+
+          // ============================================================================
+          // BANKEN-TABELLE
+          // ============================================================================
+          static constexpr MacroBank BANKS[] = {
+              {
+                  "Bank 1: Scorpion",
+                  "B1:SCORP",
+                  "  BANK 1: SCORPION   ",
+                  { "Fatality 1: You're Next",        BANK1_COMBO1_STEPS, sizeof(BANK1_COMBO1_STEPS) / sizeof(MacroStep) },
+                  { "Fatality 2: Chain Reaction",     BANK1_COMBO2_STEPS, sizeof(BANK1_COMBO2_STEPS) / sizeof(MacroStep) }
+              },
+              {
+                  "Bank 2: Sub-Zero",
+                  "B2:SUB-Z",
+                  "  BANK 2: SUB-ZERO   ",
+                  { "Fatality 1: Ice-Cutioner",       BANK2_COMBO1_STEPS, sizeof(BANK2_COMBO1_STEPS) / sizeof(MacroStep) },
+                  { "Fatality 2: Frozen in Time",     BANK2_COMBO2_STEPS, sizeof(BANK2_COMBO2_STEPS) / sizeof(MacroStep) }
+              },
+              {
+                  "Bank 3: Liu Kang",
+                  "B3:LIU-K",
+                  "  BANK 3: LIU KANG   ",
+                  { "Fatality 1: Burn Out",           BANK3_COMBO1_STEPS, sizeof(BANK3_COMBO1_STEPS) / sizeof(MacroStep) },
+                  { "Fatality 2: Belly of the Beast", BANK3_COMBO2_STEPS, sizeof(BANK3_COMBO2_STEPS) / sizeof(MacroStep) }
+              }
+          };
+
+          static constexpr size_t NUM_BANKS = sizeof(BANKS) / sizeof(MacroBank);
+
+          // ============================================================================
+          // RUNTIME-STATUS (Core-0 <-> Core-1 sicher fuer OLED-Anzeige!)
+          // ============================================================================
+          struct RuntimeState {
+              volatile uint32_t currentBank = 0;         // Startet auf Bank 1 (Index 0 = Scorpion)
+              volatile uint32_t lastBankSwitchMs = 0;    // Zeitstempel des letzten Bankwechsels (ms)
+              volatile bool     bannerActive = false;    // 2s-Banner aktiv nach Bankwechsel
+              volatile bool     isPlaying = false;       // true waehrend eine Hardcoded-Combo laeuft
+
+              bool prevSelect = false;
+              bool prevL1 = false;
+              bool prevR1 = false;
+              bool selectConsumed = false;               // true sobald Combo oder Start-Hotkey genutzt wurde
+
+              const MacroSequence* activeSeq = nullptr;
+              size_t stepIndex = 0;
+              uint64_t stepStartUs = 0;
+          };
+
+          inline RuntimeState& state() {
+              static RuntimeState instance;
+              return instance;
+          }
+
+          inline uint32_t getCurrentBankIndex() {
+              const uint32_t idx = state().currentBank;
+              return (idx < NUM_BANKS) ? idx : 0U;
+          }
+
+          inline const char* getCurrentBankName() {
+              return BANKS[getCurrentBankIndex()].name;
+          }
+
+          inline void startSequence(const MacroSequence* seq, uint64_t nowUs) {
+              if (seq == nullptr || seq->stepCount == 0) {
+                  return;
+              }
+              RuntimeState& s = state();
+              s.activeSeq = seq;
+              s.stepIndex = 0;
+              s.stepStartUs = nowUs;
+              s.isPlaying = true;
+          }
+
+          // ============================================================================
+          // CORE-0: INPUT-VERARBEITUNG & PLAYBACK-ENGINE
+          // ============================================================================
+          inline void process(Gamepad* gamepad) {
+              if (gamepad == nullptr) {
+                  return;
+              }
+
+              RuntimeState& s = state();
+              const uint64_t nowUs = time_us_64();
+              const uint32_t nowMs = static_cast<uint32_t>(nowUs / 1000ULL);
+              const uint32_t rawButtons = gamepad->state.buttons;
+
+              const bool selectNow = (rawButtons & BANK_SWITCH_MODIFIER) != 0;
+              const bool l1Now     = (rawButtons & COMBO_1_BUTTON) != 0;
+              const bool r1Now     = (rawButtons & COMBO_2_BUTTON) != 0;
+              const bool startNow  = (rawButtons & GAMEPAD_MASK_S2) != 0;
+
+              const bool selectPressed  = selectNow && !s.prevSelect;
+              const bool selectReleased = !selectNow && s.prevSelect;
+              const bool l1Pressed      = l1Now && !s.prevL1;
+              const bool r1Pressed      = r1Now && !s.prevR1;
+
+              const uint32_t bankIdx = getCurrentBankIndex();
+
+              // 1. Select gedrueckt: Bank-Wechsel vorbereiten oder gleichzeitigen Combo-Trigger erkennen
+              if (selectPressed) {
+                  s.selectConsumed = false;
+                  if (startNow) {
+                      s.selectConsumed = true;
+                  } else if (!s.isPlaying && l1Now) {
+                      s.selectConsumed = true;
+                      startSequence(&BANKS[bankIdx].combo1, nowUs);
+                  } else if (!s.isPlaying && r1Now) {
+                      s.selectConsumed = true;
+                      startSequence(&BANKS[bankIdx].combo2, nowUs);
+                  }
+              }
+
+              // 2. Waehrend Select gehalten wird: L1/R1 startet Combo und blockiert Bankwechsel
+              if (selectNow) {
+                  if (startNow) {
+                      s.selectConsumed = true;
+                  } else if (!s.isPlaying && l1Pressed) {
+                      s.selectConsumed = true;
+                      startSequence(&BANKS[bankIdx].combo1, nowUs);
+                  } else if (!s.isPlaying && r1Pressed) {
+                      s.selectConsumed = true;
+                      startSequence(&BANKS[bankIdx].combo2, nowUs);
+                  }
+              }
+
+              // 3. On-Release-Logik: Select ohne Combo/Hotkey losgelassen -> naechste Bank + 2s OLED-Banner
+              if (selectReleased && !s.selectConsumed) {
+                  const uint32_t nextBank = (bankIdx + 1U) % static_cast<uint32_t>(NUM_BANKS);
+                  s.currentBank = nextBank;
+                  s.lastBankSwitchMs = nowMs;
+                  s.bannerActive = true;
+              }
+
+              s.prevSelect = selectNow;
+              s.prevL1     = l1Now;
+              s.prevR1     = r1Now;
+
+              // 4. Trigger-Tasten unterdruecken, damit PS4 Share / L1 / R1 nicht ins Spiel leaken
+              if (SUPPRESS_SELECT_OUTPUT) {
+                  gamepad->state.buttons &= ~BANK_SWITCH_MODIFIER;
+              }
+              if (selectNow) {
+                  gamepad->state.buttons &= ~(COMBO_1_BUTTON | COMBO_2_BUTTON);
+              }
+
+              // 5. Aktives Makro zeitgenau abspielen (exklusiv, damit kein Fehleingang stoert)
+              if (s.isPlaying && s.activeSeq != nullptr) {
+                  uint64_t elapsedUs = nowUs - s.stepStartUs;
+
+                  while (s.isPlaying) {
+                      const MacroStep& step = s.activeSeq->steps[s.stepIndex];
+                      const uint64_t totalStepUs =
+                          static_cast<uint64_t>(step.durationUs) + static_cast<uint64_t>(step.waitDurationUs);
+
+                      if (elapsedUs >= totalStepUs) {
+                          elapsedUs -= totalStepUs;
+                          s.stepStartUs += totalStepUs;
+                          s.stepIndex++;
+                          if (s.stepIndex >= s.activeSeq->stepCount) {
+                              s.isPlaying = false;
+                              s.activeSeq = nullptr;
+                              break;
+                          }
+                      } else {
+                          break;
+                      }
+                  }
+
+                  if (s.isPlaying && s.activeSeq != nullptr) {
+                      const MacroStep& step = s.activeSeq->steps[s.stepIndex];
+                      gamepad->state.dpad    = 0;
+                      gamepad->state.buttons = 0;
+
+                      if (elapsedUs < step.durationUs) {
+                          gamepad->state.buttons = static_cast<uint32_t>(step.buttonMask & 0xFFFFU);
+                          gamepad->state.dpad    = static_cast<uint8_t>((step.buttonMask >> 16) & 0x0FU);
+                      }
+                  }
+              }
+          }
+
+          // ============================================================================
+          // CORE-1: OLED-ANZEIGE (SFINAE-sicher fuer 3- oder 4-Argument GPGFX::drawText)
+          // ============================================================================
+          namespace detail {
+
+          template <typename RendererT>
+          inline auto drawTextCompat(RendererT* renderer, uint8_t col, uint8_t row, const char* text, uint8_t invert, int)
+              -> decltype(renderer->drawText(col, row, std::string(text), invert), void()) {
+              renderer->drawText(col, row, std::string(text), invert);
+          }
+
+          template <typename RendererT>
+          inline void drawTextCompat(RendererT* renderer, uint8_t col, uint8_t row, const char* text, uint8_t, long) {
+              renderer->drawText(col, row, std::string(text));
+          }
+
+          } // namespace detail
+
+          template <typename RendererT>
+          inline void drawOledOverlay(RendererT* renderer) {
+              if (renderer == nullptr) {
+                  return;
+              }
+
+              RuntimeState& s = state();
+              const uint32_t bankIdx = getCurrentBankIndex();
+              const MacroBank& bank = BANKS[bankIdx];
+              const uint32_t nowMs = static_cast<uint32_t>(time_us_64() / 1000ULL);
+
+              // 1. Dauerhaftes kompaktes Badge (unten rechts: Zeile 6, Spalte 13 -> B1:SCORP / B2:SUB-Z / B3:LIU-K)
+              //    Leuchtet invertiert auf, waehrend eine Hardcoded-Combo abgefeuert wird.
+              const uint8_t badgeInvert = s.isPlaying ? 1U : 0U;
+              detail::drawTextCompat(renderer, OLED_BADGE_COL, OLED_BADGE_ROW, bank.oledBadge, badgeInvert, 0);
+
+              // 2. 2-Sekunden-Wechselbanner oben (Zeile 0, invertiert) direkt nach dem Antippen von Select
+              if (s.bannerActive) {
+                  const uint32_t elapsedMs = nowMs - s.lastBankSwitchMs;
+                  if (elapsedMs < OLED_BANNER_DURATION_MS) {
+                      detail::drawTextCompat(renderer, 0, 0, bank.oledBanner, 1U, 0);
+                  } else {
+                      s.bannerActive = false;
+                  }
+              }
+          }
+
+          } // namespace HardcodedMacros
+
+          #endif // _HARDCODED_MACROS_H_
+          """
+          write_text(header_path, header_code.lstrip("\n"))
+          print(f"[OK] Geschrieben: {header_path}")
+
+          # D1. src/gp2040.cpp (Core 0 Input-Hook)
+          gp2040_cpp = os.path.join("src", "gp2040.cpp")
+          if not os.path.isfile(gp2040_cpp):
+              print(f"[FEHLER] {gp2040_cpp} nicht gefunden!", file=sys.stderr)
+              sys.exit(1)
+
+          src = read_text(gp2040_cpp)
+          include_line = '#include "addons/hardcoded_macros.h"'
+          if include_line not in src:
+              m_inc = re.search(r'(#include\s+"gp2040\.h"\s*\n)', src)
+              if m_inc:
+                  src = src[:m_inc.end()] + include_line + "\n" + src[m_inc.end():]
+              else:
+                  src = include_line + "\n" + src
+              print("[OK] #include in src/gp2040.cpp eingefuegt.")
+          else:
+              print("[INFO] #include in src/gp2040.cpp bereits vorhanden.")
+
+          if "HardcodedMacros::process(" not in src:
+              m_hk = re.search(r'^([ \t]*)(\w+)->hotkey\(\);', src, flags=re.MULTILINE)
+              if m_hk:
+                  indent, var_name = m_hk.group(1), m_hk.group(2)
+                  inject = f"\n{indent}HardcodedMacros::process({var_name});"
+                  src = src[:m_hk.end()] + inject + src[m_hk.end():]
+                  print(f"[OK] HardcodedMacros::process({var_name}) nach hotkey() eingefuegt.")
+              else:
+                  m_proc = re.search(r'^([ \t]*)(\w+)->process\(\);', src, flags=re.MULTILINE)
+                  if not m_proc:
+                      print("[FEHLER] Konnte weder hotkey() noch process() in src/gp2040.cpp finden!", file=sys.stderr)
+                      sys.exit(1)
+                  indent, var_name = m_proc.group(1), m_proc.group(2)
+                  inject = f"{indent}HardcodedMacros::process({var_name});\n"
+                  src = src[:m_proc.start()] + inject + src[m_proc.start():]
+                  print(f"[OK] HardcodedMacros::process({var_name}) vor process() eingefuegt.")
+          else:
+              print("[INFO] HardcodedMacros::process(...) bereits vorhanden.")
+
+          write_text(gp2040_cpp, src)
+
+          # D2. src/display/ui/screens/ButtonLayoutScreen.cpp (Core 1 OLED-Overlay)
+          bls_cpp = os.path.join("src", "display", "ui", "screens", "ButtonLayoutScreen.cpp")
+          if not os.path.isfile(bls_cpp):
+              print(f"[FEHLER] {bls_cpp} nicht gefunden!", file=sys.stderr)
+              sys.exit(1)
+
+          bls_src = read_text(bls_cpp)
+          if include_line not in bls_src:
+              m_inc = re.search(r'(#include\s+"ButtonLayoutScreen\.h"\s*\n)', bls_src)
+              if m_inc:
+                  bls_src = bls_src[:m_inc.end()] + include_line + "\n" + bls_src[m_inc.end():]
+              else:
+                  bls_src = include_line + "\n" + bls_src
+              print(f"[OK] #include in {bls_cpp} eingefuegt.")
+          else:
+              print(f"[INFO] #include in {bls_cpp} bereits vorhanden.")
+
+          if "HardcodedMacros::drawOledOverlay(" not in bls_src:
+              m_draw = re.search(r'void\s+ButtonLayoutScreen::drawScreen\s*\(\s*\)\s*\{', bls_src)
+              if not m_draw:
+                  print(f"[FEHLER] Konnte ButtonLayoutScreen::drawScreen() in {bls_cpp} nicht finden!", file=sys.stderr)
+                  sys.exit(1)
+
+              open_idx = bls_src.find("{", m_draw.start())
+              close_idx = find_matching_brace(bls_src, open_idx)
+              if close_idx == -1:
+                  print(f"[FEHLER] Konnte Ende von ButtonLayoutScreen::drawScreen() in {bls_cpp} nicht bestimmen!", file=sys.stderr)
+                  sys.exit(1)
+
+              func_body = bls_src[open_idx:close_idx]
+              # Renderer-Aufruf im Body erkennen (Standard GP2040-CE: getRenderer())
+              if "getRenderer()->" in func_body:
+                  renderer_expr = "getRenderer()"
+              elif "this->getRenderer()->" in func_body:
+                  renderer_expr = "this->getRenderer()"
+              else:
+                  m_rend = re.search(r'\b(\w+)->drawText\s*\(', func_body)
+                  renderer_expr = m_rend.group(1) if m_rend else "getRenderer()"
+
+              overlay_call = f"\n    HardcodedMacros::drawOledOverlay({renderer_expr});\n"
+              bls_src = bls_src[:close_idx] + overlay_call + bls_src[close_idx:]
+              print(f"[OK] HardcodedMacros::drawOledOverlay({renderer_expr}) in ButtonLayoutScreen::drawScreen() eingefuegt.")
+          else:
+              print("[INFO] HardcodedMacros::drawOledOverlay(...) bereits vorhanden.")
+
+          write_text(bls_cpp, bls_src)
+          print("=== Alle Patches (Protobuf + C++ + Web-UI + Hardcoded Banks + OLED) erfolgreich! ===")
+
+      - name: Node.js einrichten (fuer Web-Configurator-Build via CMake)
+        if: ${{ inputs.build_webui }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Firmware mit CMake kompilieren (inkl. Web-UI, Nanopb & 32-KB-EEPROM-Check)
+        shell: bash
+        run: |
+          SKIP_FLAG=""
+          if [ "${{ inputs.build_webui }}" != "true" ]; then
+            SKIP_FLAG="-DSKIP_WEBBUILD=ON"
+          fi
+          cmake -B build -G Ninja \
+            -DGP2040_BOARDCONFIG="$TARGET_BOARD" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_FETCH_FROM_GIT=ON \
+            $SKIP_FLAG
+          cmake --build build -j"$(nproc)"
+
+      - name: Fertige .uf2 Datei sammeln
+        shell: bash
+        run: |
+          mkdir -p release_out
+          find build -maxdepth 2 -name "*.uf2" -exec cp -v {} release_out/ \;
+          ls -la release_out/
+
+      - name: Firmware-Artifact hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v6-OLED-HardcodedBanks-MK11
+          path: release_out/*.uf2
+          if-no-files-found: error
