@@ -1,4 +1,4 @@
-name: GP2040-CE All-in-One (8 Web-Slots + Hardcoded Banks MK11)
+name: GP2040-CE All-in-One v3 (8 Web-Slots Fix + Hardcoded Banks MK11)
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ on:
         default: "24"
         type: string
       build_webui:
-        description: "Web-Configurator (www) mit 8 Slots mitbauen"
+        description: "Web-Configurator (www) mit 8 Slots mitbauen (MUSS aktiviert sein!)"
         required: false
         default: true
         type: boolean
@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-protobuf protobuf-compiler
 
-      - name: 8 Web-Slots (24 Inputs, ID 143/144) & Hardcoded Banks (Bank 1-3) patchen
+      - name: 8 Web-Slots (input_macro + Web-UI + Protobuf + ID 143/144) & Hardcoded Banks patchen
         shell: python3 {0}
         run: |
           import os
@@ -86,135 +86,294 @@ jobs:
                   return f.read()
 
           def write_text(path, content):
-              os.makedirs(os.path.dirname(path), exist_ok=True)
+              parent = os.path.dirname(path)
+              if parent:
+                  os.makedirs(parent, exist_ok=True)
               with open(path, "w", encoding="utf-8", newline="\n") as f:
                   f.write(content)
 
-          # ============================================================================
-          # TEIL A: 8 WEB-CONFIG MAKRO-SLOTS (24 INPUTS, ID 143 & 144) PATCHEN
-          # ============================================================================
-          print(f"=== [A] Patche Web-Config Makros: {TARGET_SLOTS} Slots x {TARGET_INPUTS} Inputs ===")
+          def walk_files(root_dir, exts):
+              if not os.path.isdir(root_dir):
+                  return
+              for r, dirs, files in os.walk(root_dir):
+                  dirs[:] = [d for d in dirs if d not in ("node_modules", "build", "dist", ".git")]
+                  for fn in sorted(files):
+                      if fn.endswith(exts):
+                          yield os.path.join(r, fn)
 
-          # 1. proto/config.options (Nanopb Array-Groessen)
-          cfg_opt = os.path.join("proto", "config.options")
-          if os.path.isfile(cfg_opt):
-              txt = read_text(cfg_opt)
-              txt = re.sub(r'(MacroOptions\.macroList\s+max_count:)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
-              txt = re.sub(r'(Macro\.macroInputs\s+max_count:)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
-              write_text(cfg_opt, txt)
-              print(f"[OK] {cfg_opt} aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
-          else:
-              print(f"[WARN] {cfg_opt} nicht gefunden.")
+          def patch_macro_enum_cpp(txt, fp):
+              """Ergaenzt BUTTON_PRESS_MACRO_7 (ID 143) und BUTTON_PRESS_MACRO_8 (ID 144) in C++."""
+              if "BUTTON_PRESS_MACRO_6" not in txt or "BUTTON_PRESS_MACRO_7" in txt:
+                  return txt, False
+              changed = False
 
-          # 2. proto/enums.proto (BUTTON_PRESS_MACRO_7 = 143, BUTTON_PRESS_MACRO_8 = 144)
-          enums_proto = os.path.join("proto", "enums.proto")
-          if os.path.isfile(enums_proto):
-              txt = read_text(enums_proto)
-              if "BUTTON_PRESS_MACRO_7" not in txt:
-                  # Suche Ende von enum GpioAction
-                  m_enum = re.search(r'(enum\s+GpioAction\s*\{[\s\S]*?)(\n\s*\})', txt)
-                  if m_enum:
-                      addition = (
-                          f"\n    BUTTON_PRESS_MACRO_7 = {MACRO_7_ID};"
-                          f"\n    BUTTON_PRESS_MACRO_8 = {MACRO_8_ID};"
-                      )
-                      txt = txt[:m_enum.start(2)] + addition + txt[m_enum.start(2):]
-                      write_text(enums_proto, txt)
-                      print(f"[OK] {enums_proto}: BUTTON_PRESS_MACRO_7={MACRO_7_ID}, BUTTON_PRESS_MACRO_8={MACRO_8_ID} ergaenzt.")
-                  else:
-                      print("[WARN] enum GpioAction in proto/enums.proto nicht gefunden.")
-              else:
-                  print("[INFO] BUTTON_PRESS_MACRO_7 bereits in proto/enums.proto vorhanden.")
+              # 1. Einzelne switch-cases: case GpioAction::BUTTON_PRESS_MACRO_6: ... break;
+              def repl_case(m):
+                  nonlocal changed
+                  block = m.group(0)
+                  body = m.group(1)
+                  if re.search(r'\b5\b', body):
+                      b7 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                      b7 = re.sub(r'\b5\b', '6', b7)
+                      b8 = block.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                      b8 = re.sub(r'\b5\b', '7', b8)
+                      changed = True
+                      return block + "\n" + b7 + "\n" + b8
+                  return block
 
-          # 3. C++ Macro-Limit Konstanten & Macro 7/8 Mapping
-          for rel_path in [
-              os.path.join("headers", "addons", "macro_button.h"),
-              os.path.join("headers", "config_utils.h"),
-              os.path.join("src", "addons", "macro_button.cpp"),
-              os.path.join("src", "config_utils.cpp"),
-              os.path.join("src", "webconfig.cpp"),
-          ]:
-              if not os.path.isfile(rel_path):
-                  continue
-              txt = read_text(rel_path)
-              orig_txt = txt
-              txt = re.sub(r'(#define\s+MAX_MACRO_LIMIT\s+)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
-              txt = re.sub(r'(#define\s+MAX_MACRO_INPUT_LIMIT\s+)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
-              txt = re.sub(r'(constexpr\s+\w+\s+MAX_MACRO_LIMIT\s*=\s*)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
-              txt = re.sub(r'(constexpr\s+\w+\s+MAX_MACRO_INPUT_LIMIT\s*=\s*)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
+              txt_new = re.sub(
+                  r'[ \t]*case\s+(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*:([\s\S]*?break;)',
+                  repl_case,
+                  txt
+              )
+              if changed:
+                  print(f"[OK] {fp}: switch-cases fuer MACRO_7 & MACRO_8 ergaenzt.")
+                  return txt_new, True
 
-              # Erg. BUTTON_PRESS_MACRO_7 / 8 nach BUTTON_PRESS_MACRO_6 in macro_button.cpp (z. B. switch/if/array)
-              if rel_path.endswith("macro_button.cpp") and "BUTTON_PRESS_MACRO_7" not in txt:
-                  # Fall 1: switch-case mit GpioAction::BUTTON_PRESS_MACRO_6
-                  m_case = re.search(
-                      r'([ \t]*case\s+GpioAction::BUTTON_PRESS_MACRO_6\s*:[\s\S]*?break;)',
-                      txt
+              # 2. Range-Check: >= BUTTON_PRESS_MACRO_1 && <= BUTTON_PRESS_MACRO_6
+              # ID 143/144 liegen nicht direkt hinter 39 -> explizite else-if Zweige fuer Index 6 & 7!
+              range_pat = re.compile(
+                  r'([ \t]*)((?:else\s+)?if\s*\(\s*([^\s()&|]+)\s*>=\s*(GpioAction::)?BUTTON_PRESS_MACRO_1\s*&&\s*\3\s*<=\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_6\s*\)\s*\{)([\s\S]*?)(\n\1\})'
+              )
+              def repl_range(m):
+                  nonlocal changed
+                  indent, head, var, prefix, body, close = m.groups()
+                  prefix = prefix or ""
+                  sub_pat = re.compile(rf'\b{re.escape(var)}\s*-\s*(?:GpioAction::)?BUTTON_PRESS_MACRO_1\b')
+                  body7 = sub_pat.sub('6', body)
+                  body8 = sub_pat.sub('7', body)
+                  changed = True
+                  return (
+                      indent + head + body + close +
+                      f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_7) {{" + body7 + close +
+                      f" else if ({var} == {prefix}BUTTON_PRESS_MACRO_8) {{" + body8 + close
                   )
-                  if m_case:
-                      case6 = m_case.group(1)
-                      case7 = case6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7").replace("5", "6")
-                      case8 = case6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8").replace("5", "7")
-                      txt = txt[:m_case.end()] + "\n" + case7 + "\n" + case8 + txt[m_case.end():]
-                      print(f"[OK] {rel_path}: switch-cases fuer MACRO_7 & MACRO_8 ergaenzt.")
-                  else:
-                      # Fall 2: Array/Liste mit GpioAction::BUTTON_PRESS_MACRO_6
-                      m_arr = re.search(r'(GpioAction::BUTTON_PRESS_MACRO_6)(\s*,?)', txt)
-                      if m_arr:
-                          rep = "GpioAction::BUTTON_PRESS_MACRO_6,\n    GpioAction::BUTTON_PRESS_MACRO_7,\n    GpioAction::BUTTON_PRESS_MACRO_8"
-                          txt = txt[:m_arr.start()] + rep + txt[m_arr.end():]
-                          print(f"[OK] {rel_path}: Array-Eintraege fuer MACRO_7 & MACRO_8 ergaenzt.")
 
-              if txt != orig_txt:
-                  write_text(rel_path, txt)
-                  print(f"[OK] {rel_path} gepatcht.")
+              txt_new = range_pat.sub(repl_range, txt)
+              if changed:
+                  print(f"[OK] {fp}: Range-Check fuer MACRO_7 (143) & MACRO_8 (144) ergaenzt.")
+                  return txt_new, True
 
-          # 4. Web-UI (www) fuer 8 Slots & Pin-Mapping IDs 143/144 patchen
-          www_pins = os.path.join("www", "src", "Data", "Pins.ts")
-          if os.path.isfile(www_pins):
-              txt = read_text(www_pins)
-              if "BUTTON_PRESS_MACRO_7" not in txt:
-                  m_p6 = re.search(r'(BUTTON_PRESS_MACRO_6\s*:\s*\d+\s*,?)', txt)
-                  if m_p6:
-                      ins = (
-                          f"\n\tBUTTON_PRESS_MACRO_7: {MACRO_7_ID},"
-                          f"\n\tBUTTON_PRESS_MACRO_8: {MACRO_8_ID},"
-                      )
-                      txt = txt[:m_p6.end()] + ins + txt[m_p6.end():]
-                      write_text(www_pins, txt)
-                      print(f"[OK] {www_pins}: BUTTON_PRESS_MACRO_7 ({MACRO_7_ID}) & _8 ({MACRO_8_ID}) ergaenzt.")
+              # 3. Array/Liste mit GpioAction::BUTTON_PRESS_MACRO_6
+              arr_pat = re.compile(r'([ \t]*)((?:GpioAction::)?BUTTON_PRESS_MACRO_6)(\s*,?)')
+              def repl_arr(m):
+                  nonlocal changed
+                  indent, tok, comma = m.groups()
+                  prefix = "GpioAction::" if "GpioAction::" in tok else ""
+                  changed = True
+                  return (
+                      f"{indent}{prefix}BUTTON_PRESS_MACRO_6,\n"
+                      f"{indent}{prefix}BUTTON_PRESS_MACRO_7,\n"
+                      f"{indent}{prefix}BUTTON_PRESS_MACRO_8{comma}"
+                  )
 
-          for root_dir, _, files in os.walk(os.path.join("www", "src")):
-              for fn in files:
-                  if not fn.endswith((".ts", ".tsx", ".js", ".jsx")):
+              txt_new = arr_pat.sub(repl_arr, txt)
+              if changed:
+                  print(f"[OK] {fp}: Listen-/Array-Eintraege fuer MACRO_7 & MACRO_8 ergaenzt.")
+                  return txt_new, True
+
+              return txt, False
+
+          # ============================================================================
+          # TEIL A: PROTOBUF (8 SLOTS x 24 INPUTS + ID 143 / 144)
+          # ============================================================================
+          print(f"=== [A] Patche Protobuf: {TARGET_SLOTS} Slots x {TARGET_INPUTS} Inputs ===")
+
+          proto_slots_patched = False
+          proto_inputs_patched = False
+          for fp in walk_files("proto", (".options",)):
+              txt = read_text(fp)
+              orig = txt
+              txt, n1 = re.subn(r'(MacroOptions\.macroList\s+max_count:)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
+              txt, n2 = re.subn(r'(Macro\.macroInputs\s+max_count:)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
+              if n1:
+                  proto_slots_patched = True
+              if n2:
+                  proto_inputs_patched = True
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] {fp} aktualisiert (macroList={TARGET_SLOTS}, macroInputs={TARGET_INPUTS}).")
+
+          if not (proto_slots_patched and proto_inputs_patched):
+              print("[FEHLER] Konnte MacroOptions.macroList / Macro.macroInputs in proto/*.options nicht patchen!", file=sys.stderr)
+              sys.exit(1)
+
+          enums_patched = False
+          for fp in walk_files("proto", (".proto",)):
+              txt = read_text(fp)
+              if "BUTTON_PRESS_MACRO_6" not in txt:
+                  continue
+              if "BUTTON_PRESS_MACRO_7" in txt and "BUTTON_PRESS_MACRO_8" in txt:
+                  enums_patched = True
+                  print(f"[INFO] {fp}: BUTTON_PRESS_MACRO_7 & _8 bereits vorhanden.")
+                  continue
+              m_enum = re.search(r'(enum\s+GpioAction\s*\{[\s\S]*?)(\n\s*\})', txt)
+              if m_enum:
+                  addition = (
+                      f"\n    BUTTON_PRESS_MACRO_7 = {MACRO_7_ID};"
+                      f"\n    BUTTON_PRESS_MACRO_8 = {MACRO_8_ID};"
+                  )
+                  txt = txt[:m_enum.start(2)] + addition + txt[m_enum.start(2):]
+                  write_text(fp, txt)
+                  enums_patched = True
+                  print(f"[OK] {fp}: BUTTON_PRESS_MACRO_7={MACRO_7_ID}, BUTTON_PRESS_MACRO_8={MACRO_8_ID} ergaenzt.")
+
+          if not enums_patched:
+              print("[FEHLER] Konnte BUTTON_PRESS_MACRO_7/8 nicht in proto/*.proto eintragen!", file=sys.stderr)
+              sys.exit(1)
+
+          # ============================================================================
+          # TEIL B: C++ FIRMWARE REPO-WEIT PATCHEN (headers/ & src/ - inkl. input_macro!)
+          # ============================================================================
+          print("=== [B] Patche C++ Firmware (headers/ & src/) ===")
+
+          cpp_slots_hits = 0
+          cpp_inputs_hits = 0
+          cpp_enum_hits = 0
+
+          for root_dir in ("headers", "src"):
+              for fp in walk_files(root_dir, (".h", ".hpp", ".c", ".cpp")):
+                  if os.path.basename(fp) == "hardcoded_macros.h":
                       continue
-                  fp = os.path.join(root_dir, fn)
                   txt = read_text(fp)
-                  orig_txt = txt
-                  txt = re.sub(r'(MAX_MACRO_SLOTS\s*=\s*)\d+', rf'\g<1>{TARGET_SLOTS}', txt)
-                  txt = re.sub(r'(MAX_MACRO_INPUTS\s*=\s*)\d+', rf'\g<1>{TARGET_INPUTS}', txt)
-                  if fn.lower().endswith("pinmapping.jsx") or fn.lower().endswith("pinmapping.tsx") or fn.lower().endswith("pinmapping.ts"):
-                      if "BUTTON_PRESS_MACRO_6" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
-                          m_loc = re.search(r'([ \t]*BUTTON_PRESS_MACRO_6\s*:\s*[^\n]+)', txt)
-                          if m_loc:
-                              line6 = m_loc.group(1)
-                              if not line6.rstrip().endswith(","):
-                                  line6_fixed = line6 + ","
-                              else:
-                                  line6_fixed = line6
-                              line7 = line6_fixed.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7").replace("6", "7")
-                              line8 = line6_fixed.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8").replace("6", "8")
-                              txt = txt[:m_loc.start()] + line6_fixed + "\n" + line7 + "\n" + line8 + txt[m_loc.end():]
-                  if txt != orig_txt:
+                  orig = txt
+
+                  # 1. MAX_MACRO_LIMIT (#define / constexpr / const)
+                  for pat in [
+                      r'(#define\s+MAX_MACRO_LIMIT\s+)\d+',
+                      r'((?:static\s+)?(?:constexpr|const)\s+[\w:]+\s+MAX_MACRO_LIMIT\s*=\s*)\d+',
+                  ]:
+                      txt, n = re.subn(pat, rf'\g<1>{TARGET_SLOTS}', txt)
+                      cpp_slots_hits += n
+
+                  # 2. MAX_MACRO_INPUT_LIMIT (#define / constexpr / const)
+                  for pat in [
+                      r'(#define\s+MAX_MACRO_INPUT_LIMIT\s+)\d+',
+                      r'((?:static\s+)?(?:constexpr|const)\s+[\w:]+\s+MAX_MACRO_INPUT_LIMIT\s*=\s*)\d+',
+                  ]:
+                      txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
+                      cpp_inputs_hits += n
+
+                  # 3. Hardcodiertes macroList_count = 6 abfangen
+                  txt, n_cnt = re.subn(r'(macroList_count\s*=\s*)6\b', rf'\g<1>{TARGET_SLOTS}', txt)
+                  cpp_slots_hits += n_cnt
+
+                  # 4. Arithmetische Pin-Suche (BUTTON_PRESS_MACRO_1 + i) fuer nicht-fortlaufende IDs 143/144 sichern
+                  if "BUTTON_PRESS_MACRO_1" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
+                      arith_pat = re.compile(r'((?:GpioAction::)?BUTTON_PRESS_MACRO_1)\s*\+\s*(\w+)')
+                      if arith_pat.search(txt):
+                          def repl_arith(m):
+                              tok, idx_var = m.groups()
+                              pref = "GpioAction::" if "GpioAction::" in tok else ""
+                              return f"(({idx_var}) < 6 ? ({pref}BUTTON_PRESS_MACRO_1 + ({idx_var})) : ({pref}BUTTON_PRESS_MACRO_7 + (({idx_var}) - 6)))"
+                          txt = arith_pat.sub(repl_arith, txt)
+                          cpp_enum_hits += 1
+                          print(f"[OK] {fp}: BUTTON_PRESS_MACRO_1 + i fuer ID 143/144 abgesichert.")
+
+                  # 5. BUTTON_PRESS_MACRO_6 -> _7 & _8
+                  txt, enum_changed = patch_macro_enum_cpp(txt, fp)
+                  if enum_changed:
+                      cpp_enum_hits += 1
+
+                  if txt != orig:
                       write_text(fp, txt)
-                      print(f"[OK] Web-UI gepatcht: {fp}")
+                      print(f"[OK] C++ gepatcht: {fp}")
+
+          print(f"[CHECK C++] MAX_MACRO_LIMIT hits={cpp_slots_hits}, MAX_MACRO_INPUT_LIMIT hits={cpp_inputs_hits}, MACRO_7/8 hits={cpp_enum_hits}")
+
+          if cpp_slots_hits == 0:
+              print("[FEHLER] MAX_MACRO_LIMIT wurde in headers/ & src/ NIRGENDS gefunden! Abbruch statt fehlerhaftem 6-Slot-Build.", file=sys.stderr)
+              sys.exit(1)
 
           # ============================================================================
-          # TEIL B: HARDCODED MACRO BANKS (BANK 1-3, 50ms) INJIZIEREN
+          # TEIL C: WEB-UI (www/src/) REPO-WEIT PATCHEN
           # ============================================================================
-          print("=== [B] Injiziere Hardcoded Macro Banks (Bank 1-3, 0 Bytes EEPROM) ===")
+          print("=== [C] Patche Web-Configurator (www/src/) ===")
+
+          www_slots_hits = 0
+          www_inputs_hits = 0
+          www_pins_hits = 0
+
+          for fp in walk_files(os.path.join("www", "src"), (".ts", ".tsx", ".js", ".jsx", ".json")):
+              txt = read_text(fp)
+              orig = txt
+
+              # 1. Makro-Slot-Limit Konstanten (MAX_MACRO_LIMIT, MAX_MACRO_SLOTS, MAX_MACROS)
+              for pat in [
+                  r'(\bMAX_MACRO_LIMIT\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACRO_SLOTS\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACROS\s*[:=]\s*)\d+',
+                  r'(macroList\.length\s*<\s*)6\b',
+              ]:
+                  txt, n = re.subn(pat, rf'\g<1>{TARGET_SLOTS}', txt)
+                  www_slots_hits += n
+
+              # 2. Makro-Input-Limit Konstanten (MAX_MACRO_INPUT_LIMIT, MAX_MACRO_INPUTS)
+              for pat in [
+                  r'(\bMAX_MACRO_INPUT_LIMIT\s*[:=]\s*)\d+',
+                  r'(\bMAX_MACRO_INPUTS\s*[:=]\s*)\d+',
+              ]:
+                  txt, n = re.subn(pat, rf'\g<1>{TARGET_INPUTS}', txt)
+                  www_inputs_hits += n
+
+              # 3. BUTTON_PRESS_MACRO_7 (143) & BUTTON_PRESS_MACRO_8 (144) in Data/Pins.ts, Locales, etc.
+              if "BUTTON_PRESS_MACRO_6" in txt and "BUTTON_PRESS_MACRO_7" not in txt:
+                  num_pat = re.compile(r'([ \t]*)([\'"]?BUTTON_PRESS_MACRO_6[\'"]?\s*[:=]\s*)39(\s*,?)')
+                  if num_pat.search(txt):
+                      def repl_num(m):
+                          indent, lhs, comma = m.groups()
+                          lhs7 = lhs.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                          lhs8 = lhs.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                          return (
+                              f"{indent}{lhs}39,\n"
+                              f"{indent}{lhs7}{MACRO_7_ID},\n"
+                              f"{indent}{lhs8}{MACRO_8_ID}{comma}"
+                          )
+                      txt = num_pat.sub(repl_num, txt)
+                      www_pins_hits += 1
+                  else:
+                      line_pat = re.compile(r'^([ \t]*.*BUTTON_PRESS_MACRO_6.*)$', flags=re.MULTILINE)
+                      def repl_line(m):
+                          line6 = m.group(1)
+                          has_comma = line6.rstrip().endswith(",")
+                          base6 = line6 if has_comma else (line6 + ",")
+                          line7 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_7")
+                          line7 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>7', line7, flags=re.IGNORECASE)
+                          line7 = re.sub(r'(\s)6([\'"])', r'\g<1>7\2', line7)
+                          line8 = base6.replace("BUTTON_PRESS_MACRO_6", "BUTTON_PRESS_MACRO_8")
+                          line8 = re.sub(r'(Ma[ck]ro\s*)6\b', r'\g<1>8', line8, flags=re.IGNORECASE)
+                          line8 = re.sub(r'(\s)6([\'"])', r'\g<1>8\2', line8)
+                          if not has_comma:
+                              line8 = line8.rstrip(",")
+                          return f"{base6}\n{line7}\n{line8}"
+                      txt_new, n_l = line_pat.subn(repl_line, txt)
+                      if n_l > 0:
+                          txt = txt_new
+                          www_pins_hits += n_l
+
+              if txt != orig:
+                  write_text(fp, txt)
+                  print(f"[OK] Web-UI gepatcht: {fp}")
+
+          print(f"[CHECK WEB-UI] slots_hits={www_slots_hits}, inputs_hits={www_inputs_hits}, pins_hits={www_pins_hits}")
+
+          if os.path.isdir(os.path.join("www", "src")) and www_pins_hits == 0:
+              print("[FEHLER] BUTTON_PRESS_MACRO_7/8 konnte in www/src/ nicht gepatcht werden!", file=sys.stderr)
+              sys.exit(1)
+
+          if os.path.isdir(os.path.join("www", "src")) and www_slots_hits == 0:
+              print("[INFO] Keine statische Slot-Konstante in www/src/ gefunden (Web-UI rendert macroList evtl. dynamisch von der Firmware).")
+              for fp in walk_files(os.path.join("www", "src"), (".ts", ".tsx", ".js", ".jsx")):
+                  if "macro" in fp.lower():
+                      print("  Gepruefte Web-Macro-Datei:", fp)
+
+          # ============================================================================
+          # TEIL D: HARDCODED MACRO BANKS (BANK 1-3, 50ms) INJIZIEREN
+          # ============================================================================
+          print("=== [D] Injiziere Hardcoded Macro Banks (Bank 1-3, 0 Bytes EEPROM) ===")
 
           header_path = os.path.join("headers", "addons", "hardcoded_macros.h")
-          header_code = r'''#ifndef _HARDCODED_MACROS_H_
+          header_code = r"""#ifndef _HARDCODED_MACROS_H_
           #define _HARDCODED_MACROS_H_
 
           #include <cstddef>
@@ -484,7 +643,7 @@ jobs:
           } // namespace HardcodedMacros
 
           #endif // _HARDCODED_MACROS_H_
-          '''
+          """
           write_text(header_path, header_code.lstrip("\n"))
           print(f"[OK] Geschrieben: {header_path}")
 
@@ -525,7 +684,7 @@ jobs:
               print("[INFO] HardcodedMacros::process(...) bereits vorhanden.")
 
           write_text(gp2040_cpp, src)
-          print("=== Patching abgeschlossen! ===")
+          print("=== Alle Patches (Protobuf + C++ + Web-UI + Hardcoded Banks) erfolgreich! ===")
 
       - name: Node.js einrichten (fuer Web-Configurator)
         if: ${{ inputs.build_webui }}
@@ -541,8 +700,10 @@ jobs:
             cd www
             npm ci
             npm run build
+            ls -la build/ 2>/dev/null || ls -la dist/ 2>/dev/null || true
           else
-            echo "Kein www/package.json vorhanden - ueberspringe Web-UI Build."
+            echo "::error::www/package.json nicht gefunden!"
+            exit 1
           fi
 
       - name: Firmware mit CMake kompilieren (inkl. Nanopb-Regenerierung & 32-KB-EEPROM-Check)
@@ -564,6 +725,6 @@ jobs:
       - name: Firmware-Artifact hochladen
         uses: actions/upload-artifact@v4
         with:
-          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-HardcodedBanks-MK11
+          name: GP2040-CE-${{ env.TARGET_BOARD }}-8Slots-v3-HardcodedBanks-MK11
           path: release_out/*.uf2
           if-no-files-found: error
