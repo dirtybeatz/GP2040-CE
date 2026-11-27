@@ -8,9 +8,9 @@ on:
         required: true
         default: 'FlatboxRev4'
       max_macro_inputs:
-        description: 'Maximale Input-Zeilen pro Makro (z. B. 30)'
+        description: 'Maximale Input-Zeilen pro Makro (Standard: 24 für 32-KB-EEPROM)'
         required: true
-        default: '30'
+        default: '24'
 
 jobs:
   build:
@@ -18,7 +18,7 @@ jobs:
 
     env:
       BOARD_CONFIG: ${{ github.event.inputs.board_config || 'FlatboxRev4' }}
-      MAX_MACRO_INPUTS: ${{ github.event.inputs.max_macro_inputs || '30' }}
+      MAX_MACRO_INPUTS: ${{ github.event.inputs.max_macro_inputs || '24' }}
       PICO_SDK_FETCH_FROM_GIT: 1
 
     steps:
@@ -67,7 +67,7 @@ jobs:
           const TARGET_MACROS = 8;
           const TARGET_INPUTS = process.env.MAX_MACRO_INPUTS
             ? Number(process.env.MAX_MACRO_INPUTS)
-            : null;
+            : 24;
 
           function walk(dir, files = []) {
             if (!fs.existsSync(dir)) return files;
@@ -102,7 +102,7 @@ jobs:
             return false;
           }
 
-          // 1. C++ Makro-Limit (und optional Input-Limit)
+          // 1. C++ Makro-Limit und Input-Limit
           patchFile(
             'headers/addons/input_macro.h',
             (content) => {
@@ -444,7 +444,7 @@ jobs:
           }
 
           console.log(
-            `🚀 Fertig! 8 Makro-Slots (IDs ${macro7Id} & ${macro8Id}, ${patchedGpioActionFiles} Web-UI GpioAction-Dateien) eingepatcht.`
+            `🚀 Fertig! 8 Makro-Slots x ${TARGET_INPUTS} Inputs (IDs ${macro7Id} & ${macro8Id}, ${patchedGpioActionFiles} Web-UI GpioAction-Dateien) eingepatcht.`
           );
           EOF
           node patch_8_macros.mjs
